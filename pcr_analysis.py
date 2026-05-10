@@ -154,17 +154,17 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
 def extract_strike_data(chain_data: list, option_type: str) -> dict:
-    """Extract strike -> OI mapping from chain data
+    """Extract strike -> (OI, LTP) mapping from chain data
 
     Upstox API v3 structure:
     {
         "strike_price": 50000,
-        "call_options": {"market_data": {"oi": 5000000, ...}},
-        "put_options": {"market_data": {"oi": 4500000, ...}}
+        "call_options": {"market_data": {"oi": 5000000, "ltp": 100, ...}},
+        "put_options": {"market_data": {"oi": 4500000, "ltp": 150, ...}}
     }
     """
-    strike_data = {}
-    print(f"\n🔍 Extracting {option_type} data")
+    strike_data = {}  # {strike: (oi, ltp)}
+    print(f"\n🔍 Extracting {option_type} data (OI + LTP)")
     print(f"📊 Total items in chain: {len(chain_data)}")
 
     if chain_data:
@@ -182,7 +182,7 @@ def extract_strike_data(chain_data: list, option_type: str) -> dict:
             if strike <= 0:
                 continue
 
-            # Get OI from call_options or put_options
+            # Get OI and LTP from call_options or put_options
             if option_type == "CE":
                 call_md = (row.get("call_options") or {}).get("market_data") or {}
                 oi = float(call_md.get("oi") or 0)
@@ -193,10 +193,10 @@ def extract_strike_data(chain_data: list, option_type: str) -> dict:
                 ltp = float(put_md.get("ltp") or 0)
 
             if idx < 5:
-                print(f"✓ Item {idx}: Strike={strike}, {option_type}_OI={oi}, LTP={ltp}")
+                print(f"✓ Item {idx}: Strike={strike}, {option_type}_OI={oi}, {option_type}_LTP={ltp}")
 
             if oi > 0:
-                strike_data[int(strike)] = int(oi)
+                strike_data[int(strike)] = (int(oi), ltp)  # Store tuple of (OI, LTP)
                 extracted += 1
 
         except Exception as e:
@@ -234,17 +234,26 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
     rows = []
     for i in range(-6, 7):
         strike = atm_strike + (i * gap)
-        ce_oi = ce_oi_map.get(strike, 0)
-        pe_oi = pe_oi_map.get(strike, 0)
+
+        # Extract OI and LTP (tuples)
+        ce_data = ce_oi_map.get(strike, (0, 0))
+        pe_data = pe_oi_map.get(strike, (0, 0))
+
+        ce_oi = ce_data[0] if isinstance(ce_data, tuple) else ce_data
+        ce_ltp = ce_data[1] if isinstance(ce_data, tuple) else 0
+        pe_oi = pe_data[0] if isinstance(pe_data, tuple) else pe_data
+        pe_ltp = pe_data[1] if isinstance(pe_data, tuple) else 0
 
         # Calculate PCR
         pcr = pe_oi / ce_oi if ce_oi > 0 else 0.0
 
         rows.append({
             "CE OI": f"{ce_oi:,}",
+            "CE LTP": f"₹{ce_ltp:.2f}" if ce_ltp > 0 else "—",
             "Strike": f"₹{strike:,.0f}",
-            "PCR": f"{pcr:.2f}",
+            "PE LTP": f"₹{pe_ltp:.2f}" if pe_ltp > 0 else "—",
             "PE OI": f"{pe_oi:,}",
+            "PCR": f"{pcr:.2f}",
         })
 
     return {
@@ -453,8 +462,8 @@ def main():
             # Display table with ATM and PCR highlighting
             df = pd.DataFrame(pcr_info["rows"])
 
-            # Ensure correct column order: CE OI, Strike, PCR, PE OI
-            df = df[['CE OI', 'Strike', 'PCR', 'PE OI']]
+            # Ensure correct column order: CE OI | CE LTP | Strike | PE LTP | PE OI | PCR
+            df = df[['CE OI', 'CE LTP', 'Strike', 'PE LTP', 'PE OI', 'PCR']]
 
             atm_strike_str = f"₹{pcr_info['atm']:,.0f}"
 
