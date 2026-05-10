@@ -171,6 +171,7 @@ def get_option_greeks_batch(token: str, instrument_keys: list) -> dict:
     try:
         key_str = ",".join(instrument_keys[:50])  # Max 50 per request
         print(f"🔄 Fetching greeks for {len(instrument_keys)} instruments...")
+        print(f"   First 3 keys: {instrument_keys[:3]}")
 
         r = requests.get(
             "https://api.upstox.com/v3/market-quote/option-greek",
@@ -183,9 +184,19 @@ def get_option_greeks_batch(token: str, instrument_keys: list) -> dict:
             d = r.json()
             if d.get("status") == "success" and d.get("data"):
                 print(f"✅ Got greeks for {len(d['data'])} instruments")
+                # Debug: show first response
+                first_key = list(d['data'].keys())[0] if d['data'] else None
+                if first_key:
+                    first_data = d['data'][first_key]
+                    print(f"   Sample response for {first_key}:")
+                    print(f"     delta={first_data.get('delta')}, gamma={first_data.get('gamma')}, iv={first_data.get('iv')}")
                 return d["data"]
+            else:
+                print(f"⚠️ API response missing 'success' or 'data': {d}")
+                return {}
         else:
             print(f"⚠️ Greeks API error: status {r.status_code}")
+            print(f"   Response: {r.text[:200]}")
     except Exception as e:
         print(f"⚠️ Greeks API exception: {e}")
 
@@ -366,6 +377,11 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
 
         # Extract deltas for each strike
         strike_deltas = {}  # {strike: {ce_delta, pe_delta}}
+        print(f"\n📋 Extracting deltas from {len(greeks_data)} response entries...")
+        if greeks_data:
+            print(f"   Response keys (first 3): {list(greeks_data.keys())[:3]}")
+            print(f"   Looking for strike keys: {list(strike_to_keys.values())[:2]}")
+
         for strike, keys in strike_to_keys.items():
             ce_data = greeks_data.get(keys["ce"], {})
             pe_data = greeks_data.get(keys["pe"], {})
@@ -375,7 +391,9 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
 
             strike_deltas[strike] = {"ce_delta": ce_delta, "pe_delta": pe_delta}
 
-            if ce_delta != 0 or pe_delta != 0:
+            if strike in list(strike_to_keys.keys())[:3]:  # Debug first 3
+                print(f"  Strike {strike}: CE_found={keys['ce'] in greeks_data}, PE_found={keys['pe'] in greeks_data} → delta={ce_delta:.4f}/{pe_delta:.4f}")
+            elif ce_delta != 0 or pe_delta != 0:
                 print(f"  Strike {strike}: CE_delta={ce_delta:.4f}, PE_delta={pe_delta:.4f}")
 
     # Find strikes with delta in range [0.29, 0.36], closest to 0.32
