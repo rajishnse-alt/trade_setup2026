@@ -404,7 +404,7 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
 
     print(f"📋 Built {len(instrument_keys_to_fetch)} instrument keys for Greeks API")
 
-    # Calculate deltas using Mibian (Black-Scholes) instead of unreliable API
+    # Calculate deltas using Mibian (Black-Scholes) for ATM ±6 strikes only
     print(f"\n⚡ Calculating delta using Mibian Black-Scholes...")
 
     # Calculate DTE in days
@@ -423,26 +423,31 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
 
     strike_deltas = {}  # {strike: {ce_delta, pe_delta}}
 
-    for strike in ce_oi_map.keys():
-        if strike < atm_strike:  # CE side
+    # Only calculate for ATM ±6 strikes (not all strikes in chain)
+    for i in range(-6, 7):
+        strike = atm_strike + (i * gap)
+
+        # Calculate CE delta if strike exists in CE map
+        if strike in ce_oi_map and strike < atm_strike:
             ce_delta = calculate_delta_mibian(spot, strike, dte, volatility, "CE")
             if strike not in strike_deltas:
                 strike_deltas[strike] = {}
             strike_deltas[strike]["ce_delta"] = ce_delta
 
-    for strike in pe_oi_map.keys():
-        if strike > atm_strike:  # PE side
+        # Calculate PE delta if strike exists in PE map
+        if strike in pe_oi_map and strike > atm_strike:
             pe_delta = calculate_delta_mibian(spot, strike, dte, volatility, "PE")
             if strike not in strike_deltas:
                 strike_deltas[strike] = {}
             strike_deltas[strike]["pe_delta"] = pe_delta
 
-    # Show calculated deltas for ATM ±6 strikes
-    print(f"\n📊 Calculated deltas (first 5):")
-    for i, strike in enumerate(sorted(strike_deltas.keys())[:5]):
+    # Show calculated deltas
+    print(f"\n📊 Calculated deltas for ATM ±6 strikes:")
+    for strike in sorted(strike_deltas.keys()):
         ce_d = strike_deltas[strike].get("ce_delta", 0)
         pe_d = strike_deltas[strike].get("pe_delta", 0)
-        print(f"   Strike {strike}: CE_delta={ce_d:.4f}, PE_delta={pe_d:.4f}")
+        if ce_d != 0 or pe_d != 0:
+            print(f"   Strike {strike}: CE_delta={ce_d:.4f}, PE_delta={pe_d:.4f}")
 
     # Find strikes with delta in range [0.29, 0.36], closest to 0.32
     for strike in ce_oi_map.keys():
