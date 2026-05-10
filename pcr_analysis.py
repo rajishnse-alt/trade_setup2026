@@ -1,13 +1,12 @@
 """
 PCR Analysis Tool - Nifty & Bank Nifty
-Real-time Put-Call Ratio analysis based on current spot price
+Following the working app pattern from opt_analysis
 """
 
 import streamlit as st
 import requests
 import time
 import pandas as pd
-import numpy as np
 from datetime import datetime
 import pytz
 
@@ -46,27 +45,20 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .pcr-table {
-        font-size: 13px;
-    }
-    .strike-atm {
-        background-color: #1a472a !important;
-        font-weight: bold;
-    }
-    .pcr-high {
-        background-color: #1a2844 !important;
-    }
     [data-testid="stMetric"] {
         background-color: #0d1321;
         padding: 15px;
         border-radius: 8px;
         border-left: 3px solid #2979ff;
     }
+    table {
+        font-size: 13px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# HELPERS
+# HELPERS (Following working app pattern)
 # ─────────────────────────────────────────────
 
 def secrets_ok() -> bool:
@@ -127,15 +119,7 @@ def fetch_expiry_dates(token: str, symbol: str) -> tuple:
         return None, str(e)
 
 def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
-    cache_key = f"pcr_oc_{symbol}_{expiry_date}"
-    time_key = f"pcr_oc_time_{symbol}_{expiry_date}"
-    now = time.time()
-
-    if (cache_key in st.session_state and
-            time_key in st.session_state and
-            now - st.session_state[time_key] < 60):
-        return st.session_state[cache_key], None, "cached"
-
+    """Fetch FRESH option chain data (NO caching like the working app)"""
     for url in UPSTOX_OC_URLS:
         try:
             r = requests.get(
@@ -153,78 +137,62 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
             if d.get("status") == "success":
                 data = d.get("data") or []
                 if data:
-                    st.session_state[cache_key] = data
-                    st.session_state[time_key] = now
                     return data, None, url
-        except:
+        except Exception as e:
             pass
-
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
-def find_atm_strike(spot: float, gap: float) -> float:
-    """Find nearest ATM strike based on gap"""
-    return round(spot / gap) * gap
+def extract_pcr_data(chain_data: list, symbol: str, gap: int, spot: float) -> dict:
+    """Extract PCR data for ATM ±6 strikes"""
 
-def extract_strike_data(chain_data: list, option_type: str) -> dict:
-    """Extract strike -> OI mapping from chain data"""
-    strike_data = {}
+    # Find nearest ATM strike
+    atm_strike = round(spot / gap) * gap
+
+    # Extract CE and PE OI data
+    ce_oi_map = {}
+    pe_oi_map = {}
+
     for item in chain_data:
         opt = item.get("option_data", {})
-        if not opt or opt.get("option_type") != option_type:
+        if not opt:
             continue
+
         strike = float(opt.get("strike_price", 0))
         oi = int(opt.get("open_interest", 0))
+        option_type = opt.get("option_type", "")
+
         if strike > 0:
-            strike_data[strike] = oi
-    return strike_data
+            if option_type == "CE":
+                ce_oi_map[strike] = oi
+            elif option_type == "PE":
+                pe_oi_map[strike] = oi
 
-def build_pcr_table(chain_data: list, symbol: str, gap: float) -> pd.DataFrame:
-    """Build PCR table from option chain data"""
-    # Extract spot price
-    spot = None
-    for row in chain_data:
-        sp = row.get("underlying_spot_price")
-        if sp:
-            spot = float(sp)
-            break
-
-    if not spot:
-        return None, None
-
-    # Find ATM strike
-    atm_strike = find_atm_strike(spot, gap)
-
-    # Extract CE and PE data
-    ce_data = extract_strike_data(chain_data, "CE")
-    pe_data = extract_strike_data(chain_data, "PE")
-
-    # Build range: ATM-6*gap to ATM+6*gap
-    strikes = []
+    # Build rows for ATM ±6
+    rows = []
     for i in range(-6, 7):
         strike = atm_strike + (i * gap)
-        strikes.append(strike)
+        ce_oi = ce_oi_map.get(strike, 0)
+        pe_oi = pe_oi_map.get(strike, 0)
 
-    # Build table rows
-    rows = []
-    for strike in strikes:
-        ce_oi = ce_data.get(strike, 0)
-        pe_oi = pe_data.get(strike, 0)
-
-        # Calculate PCR (PE OI / CE OI)
-        if ce_oi > 0:
-            pcr = pe_oi / ce_oi
-        else:
-            pcr = 0
+        # Calculate PCR
+        pcr = pe_oi / ce_oi if ce_oi > 0 else 0
 
         rows.append({
             "Strike": f"₹{strike:,.0f}",
             "CE OI": f"{ce_oi:,}",
             "PE OI": f"{pe_oi:,}",
-            "PCR (OI)": f"{pcr:.2f}",
+            "PCR": f"{pcr:.2f}",
+            "_strike_val": strike,
+            "_ce_oi_val": ce_oi,
+            "_pe_oi_val": pe_oi,
+            "_pcr_val": pcr,
         })
 
-    df = pd.DataFrame(rows)
-    return df, atm_strike, spot
+    return {
+        "atm": atm_strike,
+        "rows": rows,
+        "spot": spot,
+    }
 
 # ─────────────────────────────────────────────
 # MAIN APP
@@ -261,7 +229,7 @@ def main():
     api_secret = st.secrets["upstox"]["api_secret"]
     redirect_uri = st.secrets["upstox"]["redirect_uri"]
 
-    # OAuth
+    # OAuth (following working app pattern)
     qp = st.query_params
     auth_code = qp.get("code")
     if auth_code and "access_token" not in st.session_state:
@@ -296,129 +264,141 @@ def main():
         """, unsafe_allow_html=True)
         st.stop()
 
-    access_token = st.session_state["access_token"]
-
-    # Sidebar controls
+    # Sidebar
     with st.sidebar:
-        st.markdown("### ⚙️ Controls")
-
-        if st.button("🔄 Manual Refresh", use_container_width=True, key="manual_refresh"):
-            # Clear cache
-            for key in list(st.session_state.keys()):
-                if key.startswith("pcr_oc_"):
-                    del st.session_state[key]
+        st.markdown("### ⚙️ Settings")
+        if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
-
         if st.button("🔓 Logout", use_container_width=True):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
 
-        st.divider()
-        st.markdown("### 📈 Last Update")
-        last_update = st.empty()
+    # Initialize expiry storage
+    if "instrument_expiries" not in st.session_state:
+        st.session_state.instrument_expiries = {}
 
-    # Initialize expiry selection
-    expiry_map = {}
+    access_token = st.session_state["access_token"]
 
-    # Fetch expiry dates for both symbols
+    # Fetch data for both symbols
+    pcr_data = {}
+
     for symbol_key in ["NIFTY", "BANKNIFTY"]:
-        expiry_dates, exp_err = fetch_expiry_dates(access_token, symbol_key)
+        config = STRIKE_CONFIG[symbol_key]
 
-        if exp_err == "token_expired":
+        # Fetch expiry dates
+        try:
+            expiry_dates, exp_err = fetch_expiry_dates(access_token, symbol_key)
+
+            if exp_err == "token_expired":
+                del st.session_state["access_token"]
+                st.rerun()
+
+            if not expiry_dates:
+                pcr_data[symbol_key] = None
+                continue
+
+        except:
+            pcr_data[symbol_key] = None
+            continue
+
+        # Get or set default expiry
+        if symbol_key not in st.session_state.instrument_expiries:
+            st.session_state.instrument_expiries[symbol_key] = expiry_dates[0]
+
+        selected = st.session_state.instrument_expiries[symbol_key]
+
+        # Fetch chain
+        data, chain_err, _ = fetch_chain(access_token, symbol_key, selected)
+
+        if chain_err == "token_expired":
             del st.session_state["access_token"]
             st.rerun()
 
-        if exp_err or not expiry_dates:
-            st.error(f"Failed to fetch expiry for {symbol_key}: {exp_err}")
-            st.stop()
+        if chain_err or not data:
+            pcr_data[symbol_key] = None
+            continue
 
-        if f"pcr_exp_{symbol_key}" not in st.session_state:
-            st.session_state[f"pcr_exp_{symbol_key}"] = expiry_dates[0]
+        # Extract spot price
+        spot = None
+        for row in data:
+            sp = row.get("underlying_spot_price")
+            if sp:
+                spot = float(sp)
+                break
 
-        expiry_map[symbol_key] = expiry_dates
+        if not spot or spot <= 0:
+            pcr_data[symbol_key] = None
+            continue
 
-    # Expiry selector
+        # Extract PCR data
+        try:
+            pcr_info = extract_pcr_data(data, symbol_key, config["gap"], spot)
+            pcr_data[symbol_key] = (pcr_info, selected)
+        except Exception as e:
+            st.error(f"Error processing {symbol_key}: {e}")
+            pcr_data[symbol_key] = None
+
+    # Display tables
+    st.subheader("📊 PCR Tables - ATM ±6 Strikes")
+
     col1, col2 = st.columns(2)
+
+    # NIFTY Table
     with col1:
-        selected_nifty_exp = st.selectbox(
-            "NIFTY Expiry",
-            options=expiry_map["NIFTY"],
-            index=expiry_map["NIFTY"].index(st.session_state["pcr_exp_NIFTY"]),
-            key="sel_nifty_pcr"
-        )
-        st.session_state["pcr_exp_NIFTY"] = selected_nifty_exp
+        st.markdown("### NIFTY 50")
+        if "NIFTY" in st.session_state.instrument_expiries:
+            selected_nifty = st.selectbox(
+                "Expiry",
+                options=[],  # Will be populated
+                key="nifty_exp"
+            )
 
+        if pcr_data["NIFTY"]:
+            pcr_info, expiry = pcr_data["NIFTY"]
+
+            st.metric("Spot Price", f"₹{pcr_info['spot']:,.2f}")
+            st.metric("ATM Strike", f"₹{pcr_info['atm']:,.0f}")
+
+            # Remove helper columns for display
+            display_rows = [
+                {k: v for k, v in row.items() if not k.startswith("_")}
+                for row in pcr_info["rows"]
+            ]
+            df = pd.DataFrame(display_rows)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No data available")
+
+    # BANKNIFTY Table
     with col2:
-        selected_bnifty_exp = st.selectbox(
-            "BANKNIFTY Expiry",
-            options=expiry_map["BANKNIFTY"],
-            index=expiry_map["BANKNIFTY"].index(st.session_state["pcr_exp_BANKNIFTY"]),
-            key="sel_bnifty_pcr"
-        )
-        st.session_state["pcr_exp_BANKNIFTY"] = selected_bnifty_exp
+        st.markdown("### BANKNIFTY")
+        if "BANKNIFTY" in st.session_state.instrument_expiries:
+            selected_bnifty = st.selectbox(
+                "Expiry",
+                options=[],  # Will be populated
+                key="bnifty_exp"
+            )
 
-    st.divider()
+        if pcr_data["BANKNIFTY"]:
+            pcr_info, expiry = pcr_data["BANKNIFTY"]
 
-    # Fetch and display NIFTY table
-    st.subheader("📊 NIFTY 50 - ATM ±6 Strikes")
+            st.metric("Spot Price", f"₹{pcr_info['spot']:,.2f}")
+            st.metric("ATM Strike", f"₹{pcr_info['atm']:,.0f}")
 
-    nifty_data, nifty_err, _ = fetch_chain(access_token, "NIFTY", selected_nifty_exp)
-
-    if nifty_err == "token_expired":
-        del st.session_state["access_token"]
-        st.rerun()
-
-    if nifty_err or not nifty_data:
-        st.error(f"Failed to fetch NIFTY data: {nifty_err}")
-    else:
-        nifty_df, nifty_atm, nifty_spot = build_pcr_table(
-            nifty_data, "NIFTY", STRIKE_CONFIG["NIFTY"]["gap"]
-        )
-        if nifty_df is not None:
-            col_nifty1, col_nifty2 = st.columns([3, 1])
-            with col_nifty1:
-                st.metric("Spot Price", f"₹{nifty_spot:,.2f}")
-            with col_nifty2:
-                st.metric("ATM Strike", f"₹{nifty_atm:,.0f}")
-            st.dataframe(nifty_df, use_container_width=True, hide_index=True)
+            # Remove helper columns for display
+            display_rows = [
+                {k: v for k, v in row.items() if not k.startswith("_")}
+                for row in pcr_info["rows"]
+            ]
+            df = pd.DataFrame(display_rows)
+            st.dataframe(df, use_container_width=True, hide_index=True)
         else:
-            st.warning("No data available for NIFTY")
-
-    st.divider()
-
-    # Fetch and display BANKNIFTY table
-    st.subheader("📊 BANKNIFTY - ATM ±6 Strikes")
-
-    bnifty_data, bnifty_err, _ = fetch_chain(access_token, "BANKNIFTY", selected_bnifty_exp)
-
-    if bnifty_err == "token_expired":
-        del st.session_state["access_token"]
-        st.rerun()
-
-    if bnifty_err or not bnifty_data:
-        st.error(f"Failed to fetch BANKNIFTY data: {bnifty_err}")
-    else:
-        bnifty_df, bnifty_atm, bnifty_spot = build_pcr_table(
-            bnifty_data, "BANKNIFTY", STRIKE_CONFIG["BANKNIFTY"]["gap"]
-        )
-        if bnifty_df is not None:
-            col_bnifty1, col_bnifty2 = st.columns([3, 1])
-            with col_bnifty1:
-                st.metric("Spot Price", f"₹{bnifty_spot:,.2f}")
-            with col_bnifty2:
-                st.metric("ATM Strike", f"₹{bnifty_atm:,.0f}")
-            st.dataframe(bnifty_df, use_container_width=True, hide_index=True)
-        else:
-            st.warning("No data available for BANKNIFTY")
-
-    # Update timestamp
-    last_update.write(f"🕐 {datetime.now(IST).strftime('%H:%M:%S IST')}")
+            st.warning("No data available")
 
     # Auto-refresh
     time.sleep(60)
     st.rerun()
-
 
 if __name__ == "__main__":
     main()
