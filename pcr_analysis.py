@@ -143,10 +143,16 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
 def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
-    """Extract PCR data for ATM ±6 strikes - PROPER EXTRACTION"""
+    """Extract PCR data for ATM ±6 strikes"""
 
     if not chain_data:
         return None
+
+    # DEBUG: Print first item structure
+    print(f"\n[DEBUG PCR] Chain data count: {len(chain_data)}")
+    if chain_data:
+        print(f"[DEBUG PCR] First item keys: {list(chain_data[0].keys())}")
+        print(f"[DEBUG PCR] First item (full): {chain_data[0]}")
 
     # Find ATM strike
     atm_strike = round(spot / gap) * gap
@@ -155,35 +161,70 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
     ce_oi_map = {}
     pe_oi_map = {}
 
-    for item in chain_data:
+    def get_field(obj, field_names, default=None):
+        """Try multiple field name variations"""
+        if not isinstance(obj, dict):
+            return default
+        for field in field_names:
+            if field in obj:
+                return obj[field]
+        return default
+
+    def get_float(val, default=0.0):
+        """Safely convert to float"""
         try:
-            # Different API versions may structure data differently
-            # Try option_data first (v2)
-            opt_data = item.get("option_data")
-            if opt_data:
-                strike = float(opt_data.get("strike_price", 0))
-                oi = int(opt_data.get("open_interest", 0))
-                opt_type = opt_data.get("option_type", "")
-
-                if strike > 0:
-                    if opt_type == "CE":
-                        ce_oi_map[strike] = oi
-                    elif opt_type == "PE":
-                        pe_oi_map[strike] = oi
-            else:
-                # Try flat structure (v3)
-                if "strike_price" in item:
-                    strike = float(item.get("strike_price", 0))
-                    oi = int(item.get("open_interest", 0))
-                    opt_type = item.get("option_type", "")
-
-                    if strike > 0:
-                        if opt_type == "CE":
-                            ce_oi_map[strike] = oi
-                        elif opt_type == "PE":
-                            pe_oi_map[strike] = oi
+            return float(val) if val else default
         except:
+            return default
+
+    def get_int(val, default=0):
+        """Safely convert to int"""
+        try:
+            return int(val) if val else default
+        except:
+            return default
+
+    for idx, item in enumerate(chain_data):
+        try:
+            # Try to extract from nested option_data first
+            opt_data = item.get("option_data") or item
+
+            # Try multiple field name variations
+            strike = get_float(get_field(opt_data, [
+                "strike_price", "strikePrice", "strike",
+                "strikeprice", "Strike"
+            ]))
+
+            oi = get_int(get_field(opt_data, [
+                "open_interest", "openInterest", "oi",
+                "open_Int", "OpenInterest"
+            ]))
+
+            opt_type = str(get_field(opt_data, [
+                "option_type", "optionType", "type",
+                "instrument_type", "instrumentType"
+            ]) or "").upper()
+
+            if idx < 5:
+                print(f"[DEBUG PCR] Item {idx}: Strike={strike}, OI={oi}, Type={opt_type}")
+                print(f"[DEBUG PCR]   Available keys: {list(opt_data.keys()) if isinstance(opt_data, dict) else 'not a dict'}")
+
+            if strike > 0:
+                # Handle CE/CALL variations
+                if opt_type in ["CE", "CALL", "C"]:
+                    ce_oi_map[strike] = oi
+                # Handle PE/PUT variations
+                elif opt_type in ["PE", "PUT", "P"]:
+                    pe_oi_map[strike] = oi
+
+        except Exception as e:
+            if idx < 5:
+                print(f"[DEBUG PCR] Error parsing item {idx}: {e}")
             pass
+
+    print(f"\n[DEBUG PCR] ✓ Extracted CE strikes: {len(ce_oi_map)}, PE strikes: {len(pe_oi_map)}")
+    print(f"[DEBUG PCR] CE OI map sample: {list(ce_oi_map.items())[:5]}")
+    print(f"[DEBUG PCR] PE OI map sample: {list(pe_oi_map.items())[:5]}")
 
     # Build rows for ATM ±6
     rows = []
