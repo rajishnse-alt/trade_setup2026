@@ -293,25 +293,48 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
     instrument_keys_to_fetch = []
     strike_to_keys = {}  # {strike: {ce_key, pe_key}}
 
+    # Get underlying symbol from first row
+    underlying_symbol = None
+    expiry_formatted = None
+    for row in chain_data:
+        try:
+            underlying = row.get("underlying_key", "")
+            if "NIFTY" in underlying and "BANK" not in underlying:
+                underlying_symbol = "NIFTY"
+            elif "BANKNIFTY" in underlying or "BANK" in underlying:
+                underlying_symbol = "BANKNIFTY"
+
+            # Format expiry: 2026-05-26 -> 2605
+            expiry_str = row.get("expiry", "")
+            if expiry_str:
+                try:
+                    exp_date = datetime.strptime(expiry_str, "%Y-%m-%d")
+                    expiry_formatted = exp_date.strftime("%y%m%d")
+                except:
+                    pass
+            break
+        except:
+            pass
+
+    print(f"📋 Symbol: {underlying_symbol}, Expiry format: {expiry_formatted}")
+
+    # Build correct instrument keys
     for row in chain_data:
         try:
             strike = int(float(row.get("strike_price", 0)))
-            if strike in atm_strikes_to_fetch:
-                # Try multiple possible locations for instrument_key
-                ce_key = (row.get("call_options", {}).get("instrument_key") or
-                         row.get("instrument_key", "").replace("CE", "CE").replace("PE", "CE"))
-                pe_key = (row.get("put_options", {}).get("instrument_key") or
-                         row.get("instrument_key", "").replace("CE", "PE"))
+            if strike in atm_strikes_to_fetch and underlying_symbol and expiry_formatted:
+                # Build full instrument key: NSE_FO:BANKNIFTY2605255300CE
+                ce_key = f"NSE_FO:{underlying_symbol}{expiry_formatted}{strike}CE"
+                pe_key = f"NSE_FO:{underlying_symbol}{expiry_formatted}{strike}PE"
 
-                if ce_key and pe_key and ce_key != pe_key:
-                    instrument_keys_to_fetch.extend([ce_key, pe_key])
-                    strike_to_keys[strike] = {"ce": ce_key, "pe": pe_key}
-                    if len(strike_to_keys) <= 3:
-                        print(f"  Strike {strike}: CE={ce_key}, PE={pe_key}")
+                instrument_keys_to_fetch.extend([ce_key, pe_key])
+                strike_to_keys[strike] = {"ce": ce_key, "pe": pe_key}
+                if len(strike_to_keys) <= 3:
+                    print(f"  Strike {strike}: CE={ce_key}, PE={pe_key}")
         except Exception as e:
             print(f"  ⚠️ Error processing strike: {e}")
 
-    print(f"📋 Building request for {len(instrument_keys_to_fetch)} instruments")
+    print(f"📋 Built {len(instrument_keys_to_fetch)} instrument keys for Greeks API")
 
     if not instrument_keys_to_fetch:
         print("❌ No instrument keys found! Falling back to no-delta mode")
