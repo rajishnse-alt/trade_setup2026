@@ -249,7 +249,7 @@ def extract_strike_data(chain_data: list, option_type: str) -> dict:
 
     return strike_data
 
-def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, token: str) -> dict:
+def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, token: str, symbol: str = None) -> dict:
     """Extract PCR data for ATM ±6 strikes using Upstox Option Greeks API
 
     Args:
@@ -258,6 +258,7 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
         spot: Current spot price
         expiry_date: Expiry date in YYYY-MM-DD format
         token: Upstox access token for Greeks API
+        symbol: Index symbol (NIFTY or BANKNIFTY) - optional, auto-detected if not provided
     """
 
     if not chain_data:
@@ -276,12 +277,16 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
     print(f"\n📞 Extracting PE data...")
     pe_oi_map = extract_strike_data(chain_data, "PE")
 
-    # Find max gamma strikes (delta 0.31-0.35) using Upstox Greeks API
+    # Find max gamma strikes (delta 0.29-0.36) using Upstox Greeks API
+    # Gamma is highest when delta is in the range [0.29, 0.36]
+    # Among those, pick the one closest to 0.32 (peak of gamma)
     max_gamma_ce = None
     max_gamma_pe = None
     min_delta_diff_ce = float('inf')
     min_delta_diff_pe = float('inf')
     target_delta = 0.32
+    delta_min = 0.29
+    delta_max = 0.36
 
     print(f"\n⚡ Fetching delta from Upstox Option Greeks API...")
 
@@ -293,26 +298,31 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
     instrument_keys_to_fetch = []
     strike_to_keys = {}  # {strike: {ce_key, pe_key}}
 
-    # Get underlying symbol from first row
-    underlying_symbol = None
+    # Get symbol and format expiry
+    underlying_symbol = symbol  # Use provided symbol
     expiry_formatted = None
+
+    # If symbol not provided, try to detect from chain data
+    if not underlying_symbol:
+        for row in chain_data:
+            try:
+                underlying = row.get("underlying_key", "")
+                if "BANK" in underlying or "Bank" in underlying:
+                    underlying_symbol = "BANKNIFTY"
+                elif "NIFTY" in underlying:
+                    underlying_symbol = "NIFTY"
+                break
+            except:
+                pass
+
+    # Format expiry: 2026-05-26 -> 260526
     for row in chain_data:
         try:
-            underlying = row.get("underlying_key", "")
-            if "NIFTY" in underlying and "BANK" not in underlying:
-                underlying_symbol = "NIFTY"
-            elif "BANKNIFTY" in underlying or "BANK" in underlying:
-                underlying_symbol = "BANKNIFTY"
-
-            # Format expiry: 2026-05-26 -> 2605
             expiry_str = row.get("expiry", "")
             if expiry_str:
-                try:
-                    exp_date = datetime.strptime(expiry_str, "%Y-%m-%d")
-                    expiry_formatted = exp_date.strftime("%y%m%d")
-                except:
-                    pass
-            break
+                exp_date = datetime.strptime(expiry_str, "%Y-%m-%d")
+                expiry_formatted = exp_date.strftime("%y%m%d")
+                break
         except:
             pass
 
@@ -357,24 +367,34 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
             if ce_delta != 0 or pe_delta != 0:
                 print(f"  Strike {strike}: CE_delta={ce_delta:.4f}, PE_delta={pe_delta:.4f}")
 
-    # Find strikes with delta closest to 0.32
+    # Find strikes with delta in range [0.29, 0.36], closest to 0.32
     for strike in ce_oi_map.keys():
         if strike < atm_strike and strike in strike_deltas:  # CE side (below ATM)
             delta = abs(strike_deltas[strike].get("ce_delta", 0))
-            delta_diff = abs(delta - target_delta)
-            if delta_diff < min_delta_diff_ce:
-                min_delta_diff_ce = delta_diff
-                max_gamma_ce = strike
-                print(f"  CE: Strike {strike} -> delta={delta:.4f} (diff={delta_diff:.4f})")
+            # Only consider deltas in the gamma range
+            if delta_min <= delta <= delta_max:
+                delta_diff = abs(delta - target_delta)
+                if delta_diff < min_delta_diff_ce:
+                    min_delta_diff_ce = delta_diff
+                    max_gamma_ce = strike
+                    print(f"  CE: Strike {strike} -> delta={delta:.4f} (in range, diff={delta_diff:.4f}) ✅")
+            else:
+                if strike in [s for s in ce_oi_map.keys() if s >= atm_strike - gap*2 and s <= atm_strike]:
+                    print(f"  CE: Strike {strike} -> delta={delta:.4f} (out of range [0.29-0.36])")
 
     for strike in pe_oi_map.keys():
         if strike > atm_strike and strike in strike_deltas:  # PE side (above ATM)
             delta = abs(strike_deltas[strike].get("pe_delta", 0))
-            delta_diff = abs(delta - target_delta)
-            if delta_diff < min_delta_diff_pe:
-                min_delta_diff_pe = delta_diff
-                max_gamma_pe = strike
-                print(f"  PE: Strike {strike} -> delta={delta:.4f} (diff={delta_diff:.4f})")
+            # Only consider deltas in the gamma range
+            if delta_min <= delta <= delta_max:
+                delta_diff = abs(delta - target_delta)
+                if delta_diff < min_delta_diff_pe:
+                    min_delta_diff_pe = delta_diff
+                    max_gamma_pe = strike
+                    print(f"  PE: Strike {strike} -> delta={delta:.4f} (in range, diff={delta_diff:.4f}) ✅")
+            else:
+                if strike in [s for s in pe_oi_map.keys() if s >= atm_strike and s <= atm_strike + gap*2]:
+                    print(f"  PE: Strike {strike} -> delta={delta:.4f} (out of range [0.29-0.36])")
 
     # Build rows for ATM ±6
     rows = []
@@ -610,8 +630,8 @@ def main():
             print(f"✅ Spot price: {spot}")
 
             # Extract PCR data
-            print(f"\n🔄 Calling extract_pcr_data with {len(data)} items, expiry={new_selected}")
-            pcr_info = extract_pcr_data(data, config["gap"], spot, new_selected, access_token)
+            print(f"\n🔄 Calling extract_pcr_data with {len(data)} items, symbol={symbol_key}, expiry={new_selected}")
+            pcr_info = extract_pcr_data(data, config["gap"], spot, new_selected, access_token, symbol_key)
 
             if not pcr_info:
                 print(f"❌ extract_pcr_data returned None")
