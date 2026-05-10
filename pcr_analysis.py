@@ -256,12 +256,16 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
             "PCR": f"{pcr:.2f}",
         })
 
+    # Calculate totals (extract OI from tuples)
+    ce_total = sum(oi for oi, _ in ce_oi_map.values()) if ce_oi_map else 0
+    pe_total = sum(oi for oi, _ in pe_oi_map.values()) if pe_oi_map else 0
+
     return {
         "atm": atm_strike,
         "rows": rows,
         "spot": spot,
-        "ce_total": sum(ce_oi_map.values()),
-        "pe_total": sum(pe_oi_map.values()),
+        "ce_total": ce_total,
+        "pe_total": pe_total,
     }
 
 # ─────────────────────────────────────────────
