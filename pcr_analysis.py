@@ -460,9 +460,12 @@ def main():
                 # Extract PCR values as floats for analysis
                 df['_pcr_float'] = df['PCR'].astype(float)
 
-                # Find optimal PCR on each side
-                ce_side_pcr = df[df['_pcr_float'] < 1]['_pcr_float']  # PCR < 1 (CE dominance)
-                pe_side_pcr = df[df['_pcr_float'] > 1]['_pcr_float']  # PCR > 1 (PE dominance)
+                # Exclude ATM row from CE/PE side calculations
+                df_non_atm = df[df['Strike'] != atm_strike_str]
+
+                # Find optimal PCR on each side (excluding ATM)
+                ce_side_pcr = df_non_atm[df_non_atm['_pcr_float'] < 1]['_pcr_float']  # PCR < 1 (CE dominance)
+                pe_side_pcr = df_non_atm[df_non_atm['_pcr_float'] > 1]['_pcr_float']  # PCR > 1 (PE dominance)
 
                 highest_ce_pcr = ce_side_pcr.max() if len(ce_side_pcr) > 0 else None  # Max of < 1
                 lowest_pe_pcr = pe_side_pcr.min() if len(pe_side_pcr) > 0 else None   # Min of > 1
