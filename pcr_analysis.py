@@ -328,19 +328,30 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
 
     print(f"📋 Symbol: {underlying_symbol}, Expiry format: {expiry_formatted}")
 
-    # Build correct instrument keys
+    # Build correct instrument keys using numeric tokens from chain data
     for row in chain_data:
         try:
             strike = int(float(row.get("strike_price", 0)))
-            if strike in atm_strikes_to_fetch and underlying_symbol and expiry_formatted:
-                # Build full instrument key: NSE_FO:BANKNIFTY2605255300CE
-                ce_key = f"NSE_FO:{underlying_symbol}{expiry_formatted}{strike}CE"
-                pe_key = f"NSE_FO:{underlying_symbol}{expiry_formatted}{strike}PE"
+            if strike in atm_strikes_to_fetch:
+                # Extract numeric instrument tokens (e.g., NSE_FO|67250)
+                ce_token = row.get("call_options", {}).get("instrument_token")
+                pe_token = row.get("put_options", {}).get("instrument_token")
 
-                instrument_keys_to_fetch.extend([ce_key, pe_key])
-                strike_to_keys[strike] = {"ce": ce_key, "pe": pe_key}
-                if len(strike_to_keys) <= 3:
-                    print(f"  Strike {strike}: CE={ce_key}, PE={pe_key}")
+                # Fallback: try instrument_key field
+                if not ce_token:
+                    ce_token = row.get("call_options", {}).get("instrument_key")
+                if not pe_token:
+                    pe_token = row.get("put_options", {}).get("instrument_key")
+
+                if ce_token and pe_token:
+                    # Format should be NSE_FO|12345 for Greeks API
+                    ce_key = ce_token if "|" in str(ce_token) else f"NSE_FO|{ce_token}"
+                    pe_key = pe_token if "|" in str(pe_token) else f"NSE_FO|{pe_token}"
+
+                    instrument_keys_to_fetch.extend([ce_key, pe_key])
+                    strike_to_keys[strike] = {"ce": ce_key, "pe": pe_key}
+                    if len(strike_to_keys) <= 3:
+                        print(f"  Strike {strike}: CE={ce_key}, PE={pe_key}")
         except Exception as e:
             print(f"  ⚠️ Error processing strike: {e}")
 
