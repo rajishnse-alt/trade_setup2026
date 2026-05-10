@@ -9,6 +9,8 @@ import time
 import pandas as pd
 from datetime import datetime
 import pytz
+from scipy.stats import norm
+import math
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -153,6 +155,35 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
     print(f"❌ All fetch attempts failed")
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
+def calculate_delta(S, K, T, r, sigma, option_type="CE"):
+    """Calculate delta using Black-Scholes model
+
+    Args:
+        S: Spot price
+        K: Strike price
+        T: Time to expiration (in years)
+        r: Risk-free rate
+        sigma: Volatility
+        option_type: "CE" for calls, "PE" for puts
+
+    Returns:
+        Delta value
+    """
+    if T <= 0:
+        T = 0.01  # Avoid division by zero
+
+    try:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+
+        if option_type == "CE":
+            delta = norm.cdf(d1)
+        else:  # PE
+            delta = norm.cdf(d1) - 1
+
+        return delta
+    except:
+        return 0
+
 def extract_strike_data(chain_data: list, option_type: str) -> dict:
     """Extract strike -> (OI, LTP) mapping from chain data
 
@@ -230,6 +261,45 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
     print(f"\n📞 Extracting PE data...")
     pe_oi_map = extract_strike_data(chain_data, "PE")
 
+    # Find max gamma strikes (delta 0.31-0.35)
+    # Calculate DTE and prepare for delta calculation
+    today = datetime.now(IST).date()
+    # Parse expiry date (format: YYYY-MM-DD)
+    try:
+        # expiry_date will be passed to this function, but we need to calculate T from it
+        # For now, estimate as 10 days average
+        dte = 10  # Will be calculated based on expiry
+        T = dte / 365.0
+    except:
+        T = 10 / 365.0
+
+    r = 0.06  # Risk-free rate (6%)
+    sigma = 0.20  # Volatility (20%) - can be estimated from data
+
+    # Find strikes with delta closest to 0.32 (max gamma)
+    max_gamma_ce = None
+    max_gamma_pe = None
+    min_delta_diff_ce = float('inf')
+    min_delta_diff_pe = float('inf')
+
+    target_delta = 0.32
+
+    for strike in ce_oi_map.keys():
+        if strike < atm_strike:  # CE side
+            delta = abs(calculate_delta(spot, strike, T, r, sigma, "CE"))
+            delta_diff = abs(delta - target_delta)
+            if delta_diff < min_delta_diff_ce:
+                min_delta_diff_ce = delta_diff
+                max_gamma_ce = strike
+
+    for strike in pe_oi_map.keys():
+        if strike > atm_strike:  # PE side
+            delta = abs(calculate_delta(spot, strike, T, r, sigma, "PE"))
+            delta_diff = abs(delta - target_delta)
+            if delta_diff < min_delta_diff_pe:
+                min_delta_diff_pe = delta_diff
+                max_gamma_pe = strike
+
     # Build rows for ATM ±6
     rows = []
     for i in range(-6, 7):
@@ -247,10 +317,17 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
         # Calculate PCR
         pcr = pe_oi / ce_oi if ce_oi > 0 else 0.0
 
+        # Add gamma marking
+        strike_display = f"₹{strike:,.0f}"
+        if strike == max_gamma_ce:
+            strike_display += " Cg"
+        elif strike == max_gamma_pe:
+            strike_display += " Pg"
+
         rows.append({
             "CE OI": f"{ce_oi:,}",
             "CE LTP": f"₹{ce_ltp:.2f}" if ce_ltp > 0 else "—",
-            "Strike": f"₹{strike:,.0f}",
+            "Strike": strike_display,
             "PE LTP": f"₹{pe_ltp:.2f}" if pe_ltp > 0 else "—",
             "PE OI": f"{pe_oi:,}",
             "PCR": f"{pcr:.2f}",
