@@ -9,8 +9,11 @@ import time
 import pandas as pd
 from datetime import datetime
 import pytz
-from scipy.stats import norm
 import math
+try:
+    import mibian
+except ImportError:
+    mibian = None
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -154,6 +157,39 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
 
     print(f"❌ All fetch attempts failed")
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
+
+def calculate_delta_mibian(spot: float, strike: float, days_to_expiry: int, volatility: float = 20, option_type: str = "CE") -> float:
+    """Calculate delta using Mibian library (Black-Scholes)
+
+    Args:
+        spot: Current underlying price
+        strike: Strike price
+        days_to_expiry: Days remaining to expiry
+        volatility: Implied volatility as percentage (default 20%)
+        option_type: "CE" for call, "PE" for put
+
+    Returns:
+        Delta value
+    """
+    if not mibian:
+        return 0
+
+    try:
+        if days_to_expiry <= 0:
+            days_to_expiry = 1
+
+        # Mibian expects volatility as percentage
+        c = mibian.BS([spot, strike, 0, days_to_expiry], volatility=volatility)
+
+        if option_type == "CE":
+            delta = c.callDelta
+        else:  # PE
+            delta = c.putDelta
+
+        return float(delta) if delta else 0
+    except Exception as e:
+        print(f"  ⚠️ Mibian delta error: {e}")
+        return 0
 
 def get_option_greeks_batch(token: str, instrument_keys: list) -> dict:
     """Fetch delta from Upstox Option Greeks API (batched)
@@ -368,33 +404,45 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
 
     print(f"📋 Built {len(instrument_keys_to_fetch)} instrument keys for Greeks API")
 
-    if not instrument_keys_to_fetch:
-        print("❌ No instrument keys found! Falling back to no-delta mode")
-        strike_deltas = {}
-    else:
-        # Fetch ALL greeks in ONE batch call
-        greeks_data = get_option_greeks_batch(token, instrument_keys_to_fetch)
+    # Calculate deltas using Mibian (Black-Scholes) instead of unreliable API
+    print(f"\n⚡ Calculating delta using Mibian Black-Scholes...")
 
-        # Extract deltas for each strike
-        strike_deltas = {}  # {strike: {ce_delta, pe_delta}}
-        print(f"\n📋 Extracting deltas from {len(greeks_data)} response entries...")
-        if greeks_data:
-            print(f"   Response keys (first 3): {list(greeks_data.keys())[:3]}")
-            print(f"   Looking for strike keys: {list(strike_to_keys.values())[:2]}")
+    # Calculate DTE in days
+    today = datetime.now(IST).date()
+    try:
+        expiry_date_obj = datetime.strptime(expiry_date, "%Y-%m-%d").date()
+        dte = (expiry_date_obj - today).days
+        dte = max(dte, 1)
+    except:
+        dte = 10
 
-        for strike, keys in strike_to_keys.items():
-            ce_data = greeks_data.get(keys["ce"], {})
-            pe_data = greeks_data.get(keys["pe"], {})
+    print(f"   DTE: {dte} days")
 
-            ce_delta = float(ce_data.get("delta", 0)) if ce_data else 0
-            pe_delta = float(pe_data.get("delta", 0)) if pe_data else 0
+    # Use estimated volatility (can be improved with IV from options)
+    volatility = 20  # Default 20% - can extract from ATM option prices if needed
 
-            strike_deltas[strike] = {"ce_delta": ce_delta, "pe_delta": pe_delta}
+    strike_deltas = {}  # {strike: {ce_delta, pe_delta}}
 
-            if strike in list(strike_to_keys.keys())[:3]:  # Debug first 3
-                print(f"  Strike {strike}: CE_found={keys['ce'] in greeks_data}, PE_found={keys['pe'] in greeks_data} → delta={ce_delta:.4f}/{pe_delta:.4f}")
-            elif ce_delta != 0 or pe_delta != 0:
-                print(f"  Strike {strike}: CE_delta={ce_delta:.4f}, PE_delta={pe_delta:.4f}")
+    for strike in ce_oi_map.keys():
+        if strike < atm_strike:  # CE side
+            ce_delta = calculate_delta_mibian(spot, strike, dte, volatility, "CE")
+            if strike not in strike_deltas:
+                strike_deltas[strike] = {}
+            strike_deltas[strike]["ce_delta"] = ce_delta
+
+    for strike in pe_oi_map.keys():
+        if strike > atm_strike:  # PE side
+            pe_delta = calculate_delta_mibian(spot, strike, dte, volatility, "PE")
+            if strike not in strike_deltas:
+                strike_deltas[strike] = {}
+            strike_deltas[strike]["pe_delta"] = pe_delta
+
+    # Show calculated deltas for ATM ±6 strikes
+    print(f"\n📊 Calculated deltas (first 5):")
+    for i, strike in enumerate(sorted(strike_deltas.keys())[:5]):
+        ce_d = strike_deltas[strike].get("ce_delta", 0)
+        pe_d = strike_deltas[strike].get("pe_delta", 0)
+        print(f"   Strike {strike}: CE_delta={ce_d:.4f}, PE_delta={pe_d:.4f}")
 
     # Find strikes with delta in range [0.29, 0.36], closest to 0.32
     for strike in ce_oi_map.keys():
