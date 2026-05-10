@@ -297,25 +297,42 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
         try:
             strike = int(float(row.get("strike_price", 0)))
             if strike in atm_strikes_to_fetch:
-                ce_key = row.get("call_options", {}).get("instrument_key")
-                pe_key = row.get("put_options", {}).get("instrument_key")
-                if ce_key and pe_key:
+                # Try multiple possible locations for instrument_key
+                ce_key = (row.get("call_options", {}).get("instrument_key") or
+                         row.get("instrument_key", "").replace("CE", "CE").replace("PE", "CE"))
+                pe_key = (row.get("put_options", {}).get("instrument_key") or
+                         row.get("instrument_key", "").replace("CE", "PE"))
+
+                if ce_key and pe_key and ce_key != pe_key:
                     instrument_keys_to_fetch.extend([ce_key, pe_key])
                     strike_to_keys[strike] = {"ce": ce_key, "pe": pe_key}
-        except:
-            pass
+                    if len(strike_to_keys) <= 3:
+                        print(f"  Strike {strike}: CE={ce_key}, PE={pe_key}")
+        except Exception as e:
+            print(f"  ⚠️ Error processing strike: {e}")
 
-    print(f"📋 Fetching greeks for {len(instrument_keys_to_fetch)} instruments (ATM ±6 strikes)")
+    print(f"📋 Building request for {len(instrument_keys_to_fetch)} instruments")
 
-    # Fetch ALL greeks in ONE batch call
-    greeks_data = get_option_greeks_batch(token, instrument_keys_to_fetch)
+    if not instrument_keys_to_fetch:
+        print("❌ No instrument keys found! Falling back to no-delta mode")
+        strike_deltas = {}
+    else:
+        # Fetch ALL greeks in ONE batch call
+        greeks_data = get_option_greeks_batch(token, instrument_keys_to_fetch)
 
-    # Extract deltas for each strike
-    strike_deltas = {}  # {strike: {ce_delta, pe_delta}}
-    for strike, keys in strike_to_keys.items():
-        ce_delta = greeks_data.get(keys["ce"], {}).get("delta", 0)
-        pe_delta = greeks_data.get(keys["pe"], {}).get("delta", 0)
-        strike_deltas[strike] = {"ce_delta": float(ce_delta), "pe_delta": float(pe_delta)}
+        # Extract deltas for each strike
+        strike_deltas = {}  # {strike: {ce_delta, pe_delta}}
+        for strike, keys in strike_to_keys.items():
+            ce_data = greeks_data.get(keys["ce"], {})
+            pe_data = greeks_data.get(keys["pe"], {})
+
+            ce_delta = float(ce_data.get("delta", 0)) if ce_data else 0
+            pe_delta = float(pe_data.get("delta", 0)) if pe_data else 0
+
+            strike_deltas[strike] = {"ce_delta": ce_delta, "pe_delta": pe_delta}
+
+            if ce_delta != 0 or pe_delta != 0:
+                print(f"  Strike {strike}: CE_delta={ce_delta:.4f}, PE_delta={pe_delta:.4f}")
 
     # Find strikes with delta closest to 0.32
     for strike in ce_oi_map.keys():
@@ -353,18 +370,27 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
         # Calculate PCR
         pcr = pe_oi / ce_oi if ce_oi > 0 else 0.0
 
-        # Add gamma marking (NO RUPEE SIGN)
+        # Add gamma marking on strike
         strike_display = f"{strike:,.0f}"
         if strike == max_gamma_ce:
             strike_display += " Cg"
         elif strike == max_gamma_pe:
             strike_display += " Pg"
 
+        # Add triangle markers on LTP
+        ce_ltp_display = f"₹{ce_ltp:.2f}" if ce_ltp > 0 else "—"
+        pe_ltp_display = f"₹{pe_ltp:.2f}" if pe_ltp > 0 else "—"
+
+        if strike == max_gamma_ce:
+            ce_ltp_display += " ▲▲"
+        if strike == max_gamma_pe:
+            pe_ltp_display += " ▼▼"
+
         rows.append({
             "CE OI": f"{ce_oi:,}",
-            "CE LTP": f"₹{ce_ltp:.2f}" if ce_ltp > 0 else "—",
+            "CE LTP": ce_ltp_display,
             "Strike": strike_display,
-            "PE LTP": f"₹{pe_ltp:.2f}" if pe_ltp > 0 else "—",
+            "PE LTP": pe_ltp_display,
             "PE OI": f"{pe_oi:,}",
             "PCR": f"{pcr:.2f}",
         })
