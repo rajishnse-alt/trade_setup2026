@@ -155,21 +155,26 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
     print(f"❌ All fetch attempts failed")
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
-def get_option_greeks(token: str, strike_ce: str, strike_pe: str) -> dict:
-    """Fetch delta from Upstox Option Greeks API
+def get_option_greeks_batch(token: str, instrument_keys: list) -> dict:
+    """Fetch delta from Upstox Option Greeks API (batched)
 
     Args:
         token: Access token
-        strike_ce: Instrument key for call option (e.g., "NSE_FO|12345")
-        strike_pe: Instrument key for put option (e.g., "NSE_FO|12346")
+        instrument_keys: List of instrument keys (max 50 per call)
 
     Returns:
-        {strike: {ce_delta: float, pe_delta: float}}
+        {instrument_key: {delta, gamma, iv, ...}}
     """
+    if not instrument_keys:
+        return {}
+
     try:
+        key_str = ",".join(instrument_keys[:50])  # Max 50 per request
+        print(f"🔄 Fetching greeks for {len(instrument_keys)} instruments...")
+
         r = requests.get(
             "https://api.upstox.com/v3/market-quote/option-greek",
-            params={"instrument_key": f"{strike_ce},{strike_pe}"},
+            params={"instrument_key": key_str},
             headers=upstox_headers(token),
             timeout=15,
         )
@@ -177,22 +182,14 @@ def get_option_greeks(token: str, strike_ce: str, strike_pe: str) -> dict:
         if r.status_code == 200:
             d = r.json()
             if d.get("status") == "success" and d.get("data"):
-                data = d["data"]
-                result = {}
-
-                # Extract CE delta
-                if strike_ce in data:
-                    result["ce_delta"] = float(data[strike_ce].get("delta", 0))
-
-                # Extract PE delta
-                if strike_pe in data:
-                    result["pe_delta"] = float(data[strike_pe].get("delta", 0))
-
-                return result if result else None
+                print(f"✅ Got greeks for {len(d['data'])} instruments")
+                return d["data"]
+        else:
+            print(f"⚠️ Greeks API error: status {r.status_code}")
     except Exception as e:
-        print(f"⚠️ Greeks API error: {e}")
+        print(f"⚠️ Greeks API exception: {e}")
 
-    return None
+    return {}
 
 def extract_strike_data(chain_data: list, option_type: str) -> dict:
     """Extract strike -> (OI, LTP) mapping from chain data
@@ -288,25 +285,37 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
 
     print(f"\n⚡ Fetching delta from Upstox Option Greeks API...")
 
-    # Build instrument key mapping from chain data
-    instrument_map = {}  # {strike: {ce_key, pe_key}}
+    # Build instrument key list ONLY for ATM ±6 strikes
+    atm_strikes_to_fetch = set()
+    for i in range(-6, 7):
+        atm_strikes_to_fetch.add(atm_strike + (i * gap))
+
+    instrument_keys_to_fetch = []
+    strike_to_keys = {}  # {strike: {ce_key, pe_key}}
+
     for row in chain_data:
         try:
             strike = int(float(row.get("strike_price", 0)))
-            ce_key = row.get("call_options", {}).get("instrument_key")
-            pe_key = row.get("put_options", {}).get("instrument_key")
-            if strike > 0 and ce_key and pe_key:
-                instrument_map[strike] = {"ce": ce_key, "pe": pe_key}
+            if strike in atm_strikes_to_fetch:
+                ce_key = row.get("call_options", {}).get("instrument_key")
+                pe_key = row.get("put_options", {}).get("instrument_key")
+                if ce_key and pe_key:
+                    instrument_keys_to_fetch.extend([ce_key, pe_key])
+                    strike_to_keys[strike] = {"ce": ce_key, "pe": pe_key}
         except:
             pass
 
-    # Fetch deltas from Greeks API for all strikes
-    strike_deltas = {}  # {strike: {ce_delta, pe_delta}}
+    print(f"📋 Fetching greeks for {len(instrument_keys_to_fetch)} instruments (ATM ±6 strikes)")
 
-    for strike, keys in instrument_map.items():
-        greeks = get_option_greeks(token, keys["ce"], keys["pe"])
-        if greeks:
-            strike_deltas[strike] = greeks
+    # Fetch ALL greeks in ONE batch call
+    greeks_data = get_option_greeks_batch(token, instrument_keys_to_fetch)
+
+    # Extract deltas for each strike
+    strike_deltas = {}  # {strike: {ce_delta, pe_delta}}
+    for strike, keys in strike_to_keys.items():
+        ce_delta = greeks_data.get(keys["ce"], {}).get("delta", 0)
+        pe_delta = greeks_data.get(keys["pe"], {}).get("delta", 0)
+        strike_deltas[strike] = {"ce_delta": float(ce_delta), "pe_delta": float(pe_delta)}
 
     # Find strikes with delta closest to 0.32
     for strike in ce_oi_map.keys():
