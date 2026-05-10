@@ -453,9 +453,56 @@ def main():
                 with col_metric2:
                     st.metric("ATM Strike", f"₹{pcr_info['atm']:,.0f}")
 
-                # Display table
+                # Display table with ATM and PCR highlighting
                 df = pd.DataFrame(pcr_info["rows"])
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                atm_strike_str = f"₹{pcr_info['atm']:,.0f}"
+
+                # Extract PCR values as floats for analysis
+                df['_pcr_float'] = df['PCR'].astype(float)
+
+                # Find optimal PCR on each side
+                ce_side_pcr = df[df['_pcr_float'] < 1]['_pcr_float']  # PCR < 1 (CE dominance)
+                pe_side_pcr = df[df['_pcr_float'] > 1]['_pcr_float']  # PCR > 1 (PE dominance)
+
+                highest_ce_pcr = ce_side_pcr.max() if len(ce_side_pcr) > 0 else None  # Max of < 1
+                lowest_pe_pcr = pe_side_pcr.min() if len(pe_side_pcr) > 0 else None   # Min of > 1
+
+                # Apply styling to highlight ATM row and optimal PCR values
+                def highlight_rows(row):
+                    styles = [''] * len(row)
+
+                    # Highlight ATM row (all columns)
+                    if row['Strike'] == atm_strike_str:
+                        styles = ['background-color: white; font-weight: bold; color: black'] * len(row)
+
+                    # Highlight optimal PCR values
+                    pcr_val = float(row['PCR'])
+
+                    # CE side: highlight highest PCR < 1 (most balanced on CE side)
+                    if highest_ce_pcr is not None and abs(pcr_val - highest_ce_pcr) < 0.001:
+                        styles[df.columns.get_loc('PCR')] = 'background-color: #FFB6C1; font-weight: bold; color: black'  # Light Pink
+
+                    # PE side: highlight lowest PCR > 1 (most balanced on PE side)
+                    if lowest_pe_pcr is not None and abs(pcr_val - lowest_pe_pcr) < 0.001:
+                        styles[df.columns.get_loc('PCR')] = 'background-color: #90EE90; font-weight: bold; color: black'  # Light Green
+
+                    return styles
+
+                # Remove temporary column and apply styling
+                df_display = df.drop('_pcr_float', axis=1)
+                styled_df = df_display.style.apply(highlight_rows, axis=1)
+
+                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+                # Show the highlighted PCR values
+                if highest_ce_pcr is not None or lowest_pe_pcr is not None:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if highest_ce_pcr is not None:
+                            st.info(f"🩷 CE Side: Highest PCR < 1 = **{highest_ce_pcr:.2f}** (Most balanced)")
+                    with col2:
+                        if lowest_pe_pcr is not None:
+                            st.info(f"💚 PE Side: Lowest PCR > 1 = **{lowest_pe_pcr:.2f}** (Most balanced)")
 
                 # Show summary
                 with st.expander("📊 Summary"):
