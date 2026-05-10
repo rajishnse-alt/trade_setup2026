@@ -119,9 +119,12 @@ def fetch_expiry_dates(token: str, symbol: str) -> tuple:
         return None, str(e)
 
 def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
-    """Fetch FRESH option chain data"""
+    """Fetch option chain data"""
+    print(f"\n🌐 fetch_chain: {symbol} expiry={expiry_date}")
+
     for url in UPSTOX_OC_URLS:
         try:
+            print(f"  📡 Trying: {url}")
             r = requests.get(
                 url,
                 params={
@@ -131,41 +134,86 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
                 headers=upstox_headers(token),
                 timeout=15,
             )
+            print(f"  Status: {r.status_code}")
             d = r.json()
             if r.status_code == 401:
+                print(f"  ❌ Token expired")
                 return None, "token_expired", url
             if d.get("status") == "success":
                 data = d.get("data") or []
+                print(f"  ✅ Success! Got {len(data)} items")
                 if data:
                     return data, None, url
+            else:
+                print(f"  ⚠️ Status: {d.get('status')}, data: {len(d.get('data', []))} items")
         except Exception as e:
+            print(f"  ❌ Exception: {e}")
             pass
+
+    print(f"❌ All fetch attempts failed")
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
 def extract_strike_data(chain_data: list, option_type: str) -> dict:
     """Extract strike -> OI mapping from chain data"""
     strike_data = {}
-    for item in chain_data:
-        opt = item.get("option_data", {})
-        if not opt or opt.get("option_type") != option_type:
+    print(f"\n🔍 [extract_strike_data] Processing {option_type}")
+    print(f"📊 Total items in chain_data: {len(chain_data)}")
+
+    if chain_data:
+        print(f"📋 First item keys: {list(chain_data[0].keys())}")
+        print(f"📄 First item: {str(chain_data[0])[:300]}...")
+
+    for idx, item in enumerate(chain_data):
+        try:
+            opt = item.get("option_data", {})
+            if not opt:
+                if idx < 2:
+                    print(f"⚠️ Item {idx}: No option_data found. Item keys: {list(item.keys())}")
+                continue
+
+            item_type = opt.get("option_type", "")
+            if item_type != option_type:
+                if idx < 2:
+                    print(f"✓ Item {idx}: Type={item_type} (skipping, looking for {option_type})")
+                continue
+
+            strike = float(opt.get("strike_price", 0))
+            oi = int(opt.get("open_interest", 0))
+
+            if idx < 3:
+                print(f"✓ Item {idx}: Strike={strike}, OI={oi}, Type={item_type}")
+
+            if strike > 0:
+                strike_data[strike] = oi
+        except Exception as e:
+            if idx < 3:
+                print(f"❌ Error processing item {idx}: {e}")
             continue
-        strike = float(opt.get("strike_price", 0))
-        oi = int(opt.get("open_interest", 0))
-        if strike > 0:
-            strike_data[strike] = oi
+
+    print(f"✅ Extracted {len(strike_data)} {option_type} strikes")
+    if strike_data:
+        sample = list(strike_data.items())[:3]
+        print(f"📈 Sample {option_type} data: {sample}")
+
     return strike_data
 
 def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
     """Extract PCR data for ATM ±6 strikes"""
 
     if not chain_data:
+        print("❌ [extract_pcr_data] No chain data provided")
         return None
+
+    print(f"\n📊 [extract_pcr_data] Starting with {len(chain_data)} items, spot={spot}, gap={gap}")
 
     # Find ATM strike
     atm_strike = round(spot / gap) * gap
+    print(f"🎯 ATM Strike: {atm_strike}")
 
     # Extract CE and PE data
+    print(f"\n📞 Extracting CE data...")
     ce_oi_map = extract_strike_data(chain_data, "CE")
+    print(f"\n📞 Extracting PE data...")
     pe_oi_map = extract_strike_data(chain_data, "PE")
 
     # Build rows for ATM ±6
@@ -261,9 +309,37 @@ def main():
                 del st.session_state[k]
             st.rerun()
 
+        st.divider()
+        show_debug = st.checkbox("🔍 Show Debug Logs")
+
     # Initialize expiry storage
     if "pcr_expiries" not in st.session_state:
         st.session_state.pcr_expiries = {}
+
+    # Initialize debug logs storage
+    if "debug_logs" not in st.session_state:
+        st.session_state.debug_logs = []
+
+    # Setup logging to capture debug output
+    import io
+    import sys
+
+    class LogCapture:
+        def __init__(self):
+            self.logs = []
+
+        def write(self, msg):
+            if msg.strip():
+                self.logs.append(msg)
+                st.session_state.debug_logs.append(msg)
+
+        def flush(self):
+            pass
+
+    # Capture print statements
+    log_capture = LogCapture()
+    old_stdout = sys.stdout
+    sys.stdout = log_capture
 
     access_token = st.session_state["access_token"]
 
@@ -312,15 +388,19 @@ def main():
 
             # Fetch chain
             try:
-                data, chain_err, _ = fetch_chain(access_token, symbol_key, new_selected)
+                print(f"\n🔗 Fetching chain for {symbol_key} expiry={new_selected}")
+                data, chain_err, url = fetch_chain(access_token, symbol_key, new_selected)
 
                 if chain_err == "token_expired":
                     del st.session_state["access_token"]
                     st.rerun()
 
                 if chain_err or not data:
+                    print(f"❌ Chain fetch error: {chain_err}")
                     st.error(f"Failed to fetch chain: {chain_err}")
                     continue
+
+                print(f"✅ Received {len(data)} items from {url}")
 
                 # Extract spot price
                 spot = None
@@ -331,15 +411,26 @@ def main():
                         break
 
                 if not spot or spot <= 0:
+                    print(f"❌ Invalid spot price: {spot}")
                     st.error("Invalid spot price")
                     continue
 
+                print(f"✅ Spot price: {spot}")
+
                 # Extract PCR data
+                print(f"\n🔄 Calling extract_pcr_data with {len(data)} items")
                 pcr_info = extract_pcr_data(data, config["gap"], spot)
 
                 if not pcr_info:
+                    print(f"❌ extract_pcr_data returned None")
                     st.error("Failed to extract data")
                     continue
+
+                print(f"✅ PCR extraction successful")
+                print(f"   CE Total: {pcr_info['ce_total']}")
+                print(f"   PE Total: {pcr_info['pe_total']}")
+                print(f"   ATM: {pcr_info['atm']}")
+                print(f"   Rows: {len(pcr_info['rows'])}")
 
                 # Display metrics
                 col_metric1, col_metric2 = st.columns(2)
@@ -359,9 +450,26 @@ def main():
                     overall_pcr = pcr_info['pe_total'] / pcr_info['ce_total'] if pcr_info['ce_total'] > 0 else 0
                     st.write(f"Overall PCR: {overall_pcr:.2f}")
 
+                # Show debug info
+                with st.expander("🔍 Debug Info"):
+                    st.code(f"Total items in chain: {len(data)}\nCE strikes extracted: {sum(1 for _ in extract_strike_data(data, 'CE'))}\nPE strikes extracted: {sum(1 for _ in extract_strike_data(data, 'PE'))}")
+
             except Exception as e:
-                st.error(f"Error: {e}")
+                print(f"❌ Exception in main loop: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                st.error(f"Error: {type(e).__name__}: {e}")
                 continue
+
+    # Restore stdout
+    sys.stdout = old_stdout
+
+    # Display debug logs if enabled
+    if show_debug and st.session_state.debug_logs:
+        st.divider()
+        with st.expander("📋 Debug Logs", expanded=True):
+            log_text = "\n".join(st.session_state.debug_logs[-100:])  # Show last 100 lines
+            st.code(log_text, language="text")
 
     # Auto-refresh
     time.sleep(60)
