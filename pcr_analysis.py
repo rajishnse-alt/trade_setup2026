@@ -480,11 +480,12 @@ def main():
             captions=[
                 "API-based (if available)",
                 "Black-Scholes (sigma=20%)",
-                "IV from ATM straddle"
+                "IV from ATM straddle ⭐ Recommended"
             ],
+            index=2,  # Default to Method 3
             label_visibility="collapsed"
         )
-        st.caption(f"Testing method {delta_method}")
+        st.caption(f"Using method {delta_method}")
 
         st.divider()
         show_debug = st.checkbox("🔍 Show Debug Logs")

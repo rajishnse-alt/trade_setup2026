@@ -1,8 +1,8 @@
-# Deploy: Test 3 Delta Calculation Methods
+# Deploy: Delta Calculation Methods (Method 3 Default)
 
 ## What's New
 
-Implemented **3 different approaches** for delta calculation to find the most accurate gamma marking:
+Implemented **3 different approaches** for delta calculation. **Method 3 is now the default** for most accurate market-adjusted gamma marking:
 
 ### **Method 1: API-based (if available)**
 - Extracts delta directly from Upstox API market data (greeks.delta)
