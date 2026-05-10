@@ -360,174 +360,174 @@ def main():
     # Display PCR Tables
     st.subheader("📊 PCR Tables - ATM ±6 Strikes")
 
-    col1, col2 = st.columns(2)
+    for symbol_key in ["NIFTY", "BANKNIFTY"]:
+        st.markdown(f"### {STRIKE_CONFIG[symbol_key]['name']}")
 
-    for col_idx, symbol_key in enumerate(["NIFTY", "BANKNIFTY"]):
-        with col1 if col_idx == 0 else col2:
-            st.markdown(f"### {STRIKE_CONFIG[symbol_key]['name']}")
+        config = STRIKE_CONFIG[symbol_key]
 
-            config = STRIKE_CONFIG[symbol_key]
+        # Fetch expiry dates
+        try:
+            expiry_dates, exp_err = fetch_expiry_dates(access_token, symbol_key)
 
-            # Fetch expiry dates
-            try:
-                expiry_dates, exp_err = fetch_expiry_dates(access_token, symbol_key)
+            if exp_err == "token_expired":
+                del st.session_state["access_token"]
+                st.rerun()
 
-                if exp_err == "token_expired":
-                    del st.session_state["access_token"]
-                    st.rerun()
-
-                if not expiry_dates:
-                    st.error("No expiry dates available")
-                    continue
-
-                # Get or set default expiry
-                if symbol_key not in st.session_state.pcr_expiries:
-                    st.session_state.pcr_expiries[symbol_key] = expiry_dates[0]
-
-                selected = st.session_state.pcr_expiries[symbol_key]
-
-                # Show expiry selector
-                new_selected = st.selectbox(
-                    "Select Expiry",
-                    options=expiry_dates,
-                    index=expiry_dates.index(selected) if selected in expiry_dates else 0,
-                    key=f"pcr_exp_{symbol_key}",
-                    label_visibility="collapsed"
-                )
-                st.session_state.pcr_expiries[symbol_key] = new_selected
-
-            except Exception as e:
-                st.error(f"Error fetching expiry: {e}")
+            if not expiry_dates:
+                st.error("No expiry dates available")
                 continue
 
-            # Fetch chain
-            try:
-                print(f"\n🔗 Fetching chain for {symbol_key} expiry={new_selected}")
-                data, chain_err, url = fetch_chain(access_token, symbol_key, new_selected)
+            # Get or set default expiry
+            if symbol_key not in st.session_state.pcr_expiries:
+                st.session_state.pcr_expiries[symbol_key] = expiry_dates[0]
 
-                if chain_err == "token_expired":
-                    del st.session_state["access_token"]
-                    st.rerun()
+            selected = st.session_state.pcr_expiries[symbol_key]
 
-                if chain_err or not data:
-                    print(f"❌ Chain fetch error: {chain_err}")
-                    st.error(f"Failed to fetch chain: {chain_err}")
-                    continue
+            # Show expiry selector
+            new_selected = st.selectbox(
+                "Select Expiry",
+                options=expiry_dates,
+                index=expiry_dates.index(selected) if selected in expiry_dates else 0,
+                key=f"pcr_exp_{symbol_key}",
+                label_visibility="collapsed"
+            )
+            st.session_state.pcr_expiries[symbol_key] = new_selected
 
-                print(f"✅ Received {len(data)} items from {url}")
+        except Exception as e:
+            st.error(f"Error fetching expiry: {e}")
+            continue
 
-                # Extract spot price
-                spot = None
-                for row in data:
-                    sp = row.get("underlying_spot_price")
-                    if sp:
-                        spot = float(sp)
-                        break
+        # Fetch chain
+        try:
+            print(f"\n🔗 Fetching chain for {symbol_key} expiry={new_selected}")
+            data, chain_err, url = fetch_chain(access_token, symbol_key, new_selected)
 
-                if not spot or spot <= 0:
-                    print(f"❌ Invalid spot price: {spot}")
-                    st.error("Invalid spot price")
-                    continue
+            if chain_err == "token_expired":
+                del st.session_state["access_token"]
+                st.rerun()
 
-                print(f"✅ Spot price: {spot}")
-
-                # Extract PCR data
-                print(f"\n🔄 Calling extract_pcr_data with {len(data)} items")
-                pcr_info = extract_pcr_data(data, config["gap"], spot)
-
-                if not pcr_info:
-                    print(f"❌ extract_pcr_data returned None")
-                    st.error("Failed to extract data")
-                    continue
-
-                print(f"✅ PCR extraction successful")
-                print(f"   CE Total: {pcr_info['ce_total']}")
-                print(f"   PE Total: {pcr_info['pe_total']}")
-                print(f"   ATM: {pcr_info['atm']}")
-                print(f"   Rows: {len(pcr_info['rows'])}")
-
-                # Display metrics
-                col_metric1, col_metric2 = st.columns(2)
-                with col_metric1:
-                    st.metric("Spot Price", f"₹{pcr_info['spot']:,.2f}")
-                with col_metric2:
-                    st.metric("ATM Strike", f"₹{pcr_info['atm']:,.0f}")
-
-                # Display table with ATM and PCR highlighting
-                df = pd.DataFrame(pcr_info["rows"])
-
-                # Ensure correct column order: CE OI, Strike, PCR, PE OI
-                df = df[['CE OI', 'Strike', 'PCR', 'PE OI']]
-
-                atm_strike_str = f"₹{pcr_info['atm']:,.0f}"
-
-                # Extract PCR values as floats for analysis
-                df['_pcr_float'] = df['PCR'].astype(float)
-
-                # Exclude ATM row from CE/PE side calculations
-                df_non_atm = df[df['Strike'] != atm_strike_str]
-
-                # Find optimal PCR on each side (excluding ATM)
-                ce_side_pcr = df_non_atm[df_non_atm['_pcr_float'] < 1]['_pcr_float']  # PCR < 1 (CE dominance)
-                pe_side_pcr = df_non_atm[df_non_atm['_pcr_float'] > 1]['_pcr_float']  # PCR > 1 (PE dominance)
-
-                highest_ce_pcr = ce_side_pcr.max() if len(ce_side_pcr) > 0 else None  # Max of < 1
-                lowest_pe_pcr = pe_side_pcr.min() if len(pe_side_pcr) > 0 else None   # Min of > 1
-
-                # Apply styling to highlight ATM row and optimal PCR values
-                def highlight_rows(row):
-                    styles = [''] * len(row)
-
-                    # Highlight ATM row (all columns)
-                    if row['Strike'] == atm_strike_str:
-                        styles = ['background-color: white; font-weight: bold; color: black'] * len(row)
-
-                    # Highlight optimal PCR values
-                    pcr_val = float(row['PCR'])
-
-                    # CE side: highlight highest PCR < 1 (most balanced on CE side)
-                    if highest_ce_pcr is not None and abs(pcr_val - highest_ce_pcr) < 0.001:
-                        styles[df.columns.get_loc('PCR')] = 'background-color: #FFB6C1; font-weight: bold; color: black'  # Light Pink
-
-                    # PE side: highlight lowest PCR > 1 (most balanced on PE side)
-                    if lowest_pe_pcr is not None and abs(pcr_val - lowest_pe_pcr) < 0.001:
-                        styles[df.columns.get_loc('PCR')] = 'background-color: #90EE90; font-weight: bold; color: black'  # Light Green
-
-                    return styles
-
-                # Remove temporary column and apply styling
-                df_display = df.drop('_pcr_float', axis=1)
-                styled_df = df_display.style.apply(highlight_rows, axis=1)
-
-                st.dataframe(styled_df, use_container_width=True, hide_index=True)
-
-                # Show the highlighted PCR values
-                if highest_ce_pcr is not None or lowest_pe_pcr is not None:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if highest_ce_pcr is not None:
-                            st.info(f"🩷 CE Side: Highest PCR < 1 = **{highest_ce_pcr:.2f}** (Most balanced)")
-                    with col2:
-                        if lowest_pe_pcr is not None:
-                            st.info(f"💚 PE Side: Lowest PCR > 1 = **{lowest_pe_pcr:.2f}** (Most balanced)")
-
-                # Show summary
-                with st.expander("📊 Summary"):
-                    st.write(f"Total CE OI: {pcr_info['ce_total']:,}")
-                    st.write(f"Total PE OI: {pcr_info['pe_total']:,}")
-                    overall_pcr = pcr_info['pe_total'] / pcr_info['ce_total'] if pcr_info['ce_total'] > 0 else 0
-                    st.write(f"Overall PCR: {overall_pcr:.2f}")
-
-                # Show debug info
-                with st.expander("🔍 Debug Info"):
-                    st.code(f"Total items in chain: {len(data)}\nCE strikes extracted: {sum(1 for _ in extract_strike_data(data, 'CE'))}\nPE strikes extracted: {sum(1 for _ in extract_strike_data(data, 'PE'))}")
-
-            except Exception as e:
-                print(f"❌ Exception in main loop: {type(e).__name__}: {e}")
-                import traceback
-                traceback.print_exc()
-                st.error(f"Error: {type(e).__name__}: {e}")
+            if chain_err or not data:
+                print(f"❌ Chain fetch error: {chain_err}")
+                st.error(f"Failed to fetch chain: {chain_err}")
                 continue
+
+            print(f"✅ Received {len(data)} items from {url}")
+
+            # Extract spot price
+            spot = None
+            for row in data:
+                sp = row.get("underlying_spot_price")
+                if sp:
+                    spot = float(sp)
+                    break
+
+            if not spot or spot <= 0:
+                print(f"❌ Invalid spot price: {spot}")
+                st.error("Invalid spot price")
+                continue
+
+            print(f"✅ Spot price: {spot}")
+
+            # Extract PCR data
+            print(f"\n🔄 Calling extract_pcr_data with {len(data)} items")
+            pcr_info = extract_pcr_data(data, config["gap"], spot)
+
+            if not pcr_info:
+                print(f"❌ extract_pcr_data returned None")
+                st.error("Failed to extract data")
+                continue
+
+            print(f"✅ PCR extraction successful")
+            print(f"   CE Total: {pcr_info['ce_total']}")
+            print(f"   PE Total: {pcr_info['pe_total']}")
+            print(f"   ATM: {pcr_info['atm']}")
+            print(f"   Rows: {len(pcr_info['rows'])}")
+
+            # Display metrics
+            col_metric1, col_metric2 = st.columns(2)
+            with col_metric1:
+                st.metric("Spot Price", f"₹{pcr_info['spot']:,.2f}")
+            with col_metric2:
+                st.metric("ATM Strike", f"₹{pcr_info['atm']:,.0f}")
+
+            # Display table with ATM and PCR highlighting
+            df = pd.DataFrame(pcr_info["rows"])
+
+            # Ensure correct column order: CE OI, Strike, PCR, PE OI
+            df = df[['CE OI', 'Strike', 'PCR', 'PE OI']]
+
+            atm_strike_str = f"₹{pcr_info['atm']:,.0f}"
+
+            # Extract PCR values as floats for analysis
+            df['_pcr_float'] = df['PCR'].astype(float)
+
+            # Exclude ATM row from CE/PE side calculations
+            df_non_atm = df[df['Strike'] != atm_strike_str]
+
+            # Find optimal PCR on each side (excluding ATM)
+            ce_side_pcr = df_non_atm[df_non_atm['_pcr_float'] < 1]['_pcr_float']  # PCR < 1 (CE dominance)
+            pe_side_pcr = df_non_atm[df_non_atm['_pcr_float'] > 1]['_pcr_float']  # PCR > 1 (PE dominance)
+
+            highest_ce_pcr = ce_side_pcr.max() if len(ce_side_pcr) > 0 else None  # Max of < 1
+            lowest_pe_pcr = pe_side_pcr.min() if len(pe_side_pcr) > 0 else None   # Min of > 1
+
+            # Apply styling to highlight ATM row and optimal PCR values
+            def highlight_rows(row):
+                styles = [''] * len(row)
+
+                # Highlight ATM row (all columns)
+                if row['Strike'] == atm_strike_str:
+                    styles = ['background-color: white; font-weight: bold; color: black'] * len(row)
+
+                # Highlight optimal PCR values
+                pcr_val = float(row['PCR'])
+
+                # CE side: highlight highest PCR < 1 (most balanced on CE side)
+                if highest_ce_pcr is not None and abs(pcr_val - highest_ce_pcr) < 0.001:
+                    styles[df.columns.get_loc('PCR')] = 'background-color: #FFB6C1; font-weight: bold; color: black'  # Light Pink
+
+                # PE side: highlight lowest PCR > 1 (most balanced on PE side)
+                if lowest_pe_pcr is not None and abs(pcr_val - lowest_pe_pcr) < 0.001:
+                    styles[df.columns.get_loc('PCR')] = 'background-color: #90EE90; font-weight: bold; color: black'  # Light Green
+
+                return styles
+
+            # Remove temporary column and apply styling
+            df_display = df.drop('_pcr_float', axis=1)
+            styled_df = df_display.style.apply(highlight_rows, axis=1)
+
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+            # Show the highlighted PCR values
+            if highest_ce_pcr is not None or lowest_pe_pcr is not None:
+                col1, col2 = st.columns(2)
+                with col1:
+                    if highest_ce_pcr is not None:
+                        st.info(f"🩷 CE Side: Highest PCR < 1 = **{highest_ce_pcr:.2f}** (Most balanced)")
+                with col2:
+                    if lowest_pe_pcr is not None:
+                        st.info(f"💚 PE Side: Lowest PCR > 1 = **{lowest_pe_pcr:.2f}** (Most balanced)")
+
+            # Show summary
+            with st.expander("📊 Summary"):
+                st.write(f"Total CE OI: {pcr_info['ce_total']:,}")
+                st.write(f"Total PE OI: {pcr_info['pe_total']:,}")
+                overall_pcr = pcr_info['pe_total'] / pcr_info['ce_total'] if pcr_info['ce_total'] > 0 else 0
+                st.write(f"Overall PCR: {overall_pcr:.2f}")
+
+            # Show debug info
+            with st.expander("🔍 Debug Info"):
+                st.code(f"Total items in chain: {len(data)}\nCE strikes extracted: {sum(1 for _ in extract_strike_data(data, 'CE'))}\nPE strikes extracted: {sum(1 for _ in extract_strike_data(data, 'PE'))}")
+
+        except Exception as e:
+            print(f"❌ Exception in main loop: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            st.error(f"Error: {type(e).__name__}: {e}")
+            continue
+
+        # Add divider between tables
+        st.divider()
 
     # Restore stdout
     sys.stdout = old_stdout
