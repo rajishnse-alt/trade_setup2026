@@ -142,89 +142,31 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
             pass
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
+def extract_strike_data(chain_data: list, option_type: str) -> dict:
+    """Extract strike -> OI mapping from chain data"""
+    strike_data = {}
+    for item in chain_data:
+        opt = item.get("option_data", {})
+        if not opt or opt.get("option_type") != option_type:
+            continue
+        strike = float(opt.get("strike_price", 0))
+        oi = int(opt.get("open_interest", 0))
+        if strike > 0:
+            strike_data[strike] = oi
+    return strike_data
+
 def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
     """Extract PCR data for ATM ±6 strikes"""
 
     if not chain_data:
         return None
 
-    # DEBUG: Print first item structure
-    print(f"\n[DEBUG PCR] Chain data count: {len(chain_data)}")
-    if chain_data:
-        print(f"[DEBUG PCR] First item keys: {list(chain_data[0].keys())}")
-        print(f"[DEBUG PCR] First item (full): {chain_data[0]}")
-
     # Find ATM strike
     atm_strike = round(spot / gap) * gap
 
-    # Build strike->OI maps by examining each row
-    ce_oi_map = {}
-    pe_oi_map = {}
-
-    def get_field(obj, field_names, default=None):
-        """Try multiple field name variations"""
-        if not isinstance(obj, dict):
-            return default
-        for field in field_names:
-            if field in obj:
-                return obj[field]
-        return default
-
-    def get_float(val, default=0.0):
-        """Safely convert to float"""
-        try:
-            return float(val) if val else default
-        except:
-            return default
-
-    def get_int(val, default=0):
-        """Safely convert to int"""
-        try:
-            return int(val) if val else default
-        except:
-            return default
-
-    for idx, item in enumerate(chain_data):
-        try:
-            # Try to extract from nested option_data first
-            opt_data = item.get("option_data") or item
-
-            # Try multiple field name variations
-            strike = get_float(get_field(opt_data, [
-                "strike_price", "strikePrice", "strike",
-                "strikeprice", "Strike"
-            ]))
-
-            oi = get_int(get_field(opt_data, [
-                "open_interest", "openInterest", "oi",
-                "open_Int", "OpenInterest"
-            ]))
-
-            opt_type = str(get_field(opt_data, [
-                "option_type", "optionType", "type",
-                "instrument_type", "instrumentType"
-            ]) or "").upper()
-
-            if idx < 5:
-                print(f"[DEBUG PCR] Item {idx}: Strike={strike}, OI={oi}, Type={opt_type}")
-                print(f"[DEBUG PCR]   Available keys: {list(opt_data.keys()) if isinstance(opt_data, dict) else 'not a dict'}")
-
-            if strike > 0:
-                # Handle CE/CALL variations
-                if opt_type in ["CE", "CALL", "C"]:
-                    ce_oi_map[strike] = oi
-                # Handle PE/PUT variations
-                elif opt_type in ["PE", "PUT", "P"]:
-                    pe_oi_map[strike] = oi
-
-        except Exception as e:
-            if idx < 5:
-                print(f"[DEBUG PCR] Error parsing item {idx}: {e}")
-            pass
-
-    print(f"\n[DEBUG PCR] ✓ Extracted CE strikes: {len(ce_oi_map)}, PE strikes: {len(pe_oi_map)}")
-    print(f"[DEBUG PCR] CE OI map sample: {list(ce_oi_map.items())[:5]}")
-    print(f"[DEBUG PCR] PE OI map sample: {list(pe_oi_map.items())[:5]}")
+    # Extract CE and PE data
+    ce_oi_map = extract_strike_data(chain_data, "CE")
+    pe_oi_map = extract_strike_data(chain_data, "PE")
 
     # Build rows for ATM ±6
     rows = []
