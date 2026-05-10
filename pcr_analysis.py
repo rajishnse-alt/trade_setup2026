@@ -155,59 +155,44 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
     print(f"❌ All fetch attempts failed")
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
-def calculate_delta_method1(chain_data, S, K, T, option_type="CE"):
-    """Approach 1: Extract delta directly from Upstox API if available"""
+def get_option_greeks(token: str, strike_ce: str, strike_pe: str) -> dict:
+    """Fetch delta from Upstox Option Greeks API
+
+    Args:
+        token: Access token
+        strike_ce: Instrument key for call option (e.g., "NSE_FO|12345")
+        strike_pe: Instrument key for put option (e.g., "NSE_FO|12346")
+
+    Returns:
+        {strike: {ce_delta: float, pe_delta: float}}
+    """
     try:
-        for row in chain_data:
-            if int(float(row.get("strike_price", 0))) == K:
-                if option_type == "CE":
-                    delta = (row.get("call_options") or {}).get("greeks", {}).get("delta") or None
-                else:
-                    delta = (row.get("put_options") or {}).get("greeks", {}).get("delta") or None
-                if delta is not None:
-                    return float(delta)
-    except:
-        pass
+        r = requests.get(
+            "https://api.upstox.com/v3/market-quote/option-greek",
+            params={"instrument_key": f"{strike_ce},{strike_pe}"},
+            headers=upstox_headers(token),
+            timeout=15,
+        )
+
+        if r.status_code == 200:
+            d = r.json()
+            if d.get("status") == "success" and d.get("data"):
+                data = d["data"]
+                result = {}
+
+                # Extract CE delta
+                if strike_ce in data:
+                    result["ce_delta"] = float(data[strike_ce].get("delta", 0))
+
+                # Extract PE delta
+                if strike_pe in data:
+                    result["pe_delta"] = float(data[strike_pe].get("delta", 0))
+
+                return result if result else None
+    except Exception as e:
+        print(f"⚠️ Greeks API error: {e}")
+
     return None
-
-def calculate_delta_method2(S, K, T, r, sigma, option_type="CE"):
-    """Approach 2: Black-Scholes with optimized fixed parameters"""
-    if T <= 0:
-        T = 0.01
-    try:
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        if option_type == "CE":
-            delta = norm.cdf(d1)
-        else:
-            delta = norm.cdf(d1) - 1
-        return delta
-    except:
-        return 0
-
-def calculate_iv_from_atm(chain_data, spot, atm_strike, T):
-    """Calculate implied volatility from ATM option prices"""
-    try:
-        for row in chain_data:
-            if int(float(row.get("strike_price", 0))) == atm_strike:
-                ce_ltp = (row.get("call_options") or {}).get("market_data", {}).get("ltp") or 0
-                pe_ltp = (row.get("put_options") or {}).get("market_data", {}).get("ltp") or 0
-
-                if ce_ltp > 0 and pe_ltp > 0:
-                    # Simple IV estimation from straddle
-                    straddle_price = ce_ltp + pe_ltp
-                    # Rough heuristic: IV ≈ straddle_price / (spot * sqrt(T))
-                    iv = (straddle_price / (spot * math.sqrt(T))) * 0.4
-                    return max(0.10, min(0.80, iv))  # Bound IV between 10% and 80%
-    except:
-        pass
-    return None
-
-def calculate_delta_method3(chain_data, S, K, T, r, atm_strike, option_type="CE"):
-    """Approach 3: Black-Scholes with IV extracted from ATM straddle"""
-    sigma = calculate_iv_from_atm(chain_data, S, atm_strike, T)
-    if sigma is None or sigma <= 0:
-        sigma = 0.20  # Fallback
-    return calculate_delta_method2(S, K, T, r, sigma, option_type)
 
 def extract_strike_data(chain_data: list, option_type: str) -> dict:
     """Extract strike -> (OI, LTP) mapping from chain data
@@ -267,22 +252,22 @@ def extract_strike_data(chain_data: list, option_type: str) -> dict:
 
     return strike_data
 
-def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, method: int = 1) -> dict:
-    """Extract PCR data for ATM ±6 strikes
+def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, token: str) -> dict:
+    """Extract PCR data for ATM ±6 strikes using Upstox Option Greeks API
 
     Args:
         chain_data: Option chain data from Upstox
         gap: Strike spacing (50 for NIFTY, 100 for BANKNIFTY)
         spot: Current spot price
         expiry_date: Expiry date in YYYY-MM-DD format
-        method: Delta calculation method (1, 2, or 3)
+        token: Upstox access token for Greeks API
     """
 
     if not chain_data:
         print("❌ [extract_pcr_data] No chain data provided")
         return None
 
-    print(f"\n📊 [extract_pcr_data] Starting with {len(chain_data)} items, spot={spot}, gap={gap}, method={method}")
+    print(f"\n📊 [extract_pcr_data] Starting with {len(chain_data)} items, spot={spot}, gap={gap}")
 
     # Find ATM strike
     atm_strike = round(spot / gap) * gap
@@ -294,67 +279,53 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
     print(f"\n📞 Extracting PE data...")
     pe_oi_map = extract_strike_data(chain_data, "PE")
 
-    # Calculate real DTE
-    today = datetime.now(IST).date()
-    try:
-        expiry = datetime.strptime(expiry_date, "%Y-%m-%d").date()
-        dte = (expiry - today).days
-        dte = max(dte, 1)  # Minimum 1 day
-    except:
-        dte = 10
-
-    T = dte / 365.0
-    print(f"📅 DTE: {dte} days, T: {T:.4f} years")
-
-    r = 0.06  # Risk-free rate (6%)
-
-    # Find max gamma strikes (delta 0.31-0.35)
+    # Find max gamma strikes (delta 0.31-0.35) using Upstox Greeks API
     max_gamma_ce = None
     max_gamma_pe = None
     min_delta_diff_ce = float('inf')
     min_delta_diff_pe = float('inf')
     target_delta = 0.32
 
-    print(f"\n🔢 Calculating deltas using Method {method}...")
+    print(f"\n⚡ Fetching delta from Upstox Option Greeks API...")
 
+    # Build instrument key mapping from chain data
+    instrument_map = {}  # {strike: {ce_key, pe_key}}
+    for row in chain_data:
+        try:
+            strike = int(float(row.get("strike_price", 0)))
+            ce_key = row.get("call_options", {}).get("instrument_key")
+            pe_key = row.get("put_options", {}).get("instrument_key")
+            if strike > 0 and ce_key and pe_key:
+                instrument_map[strike] = {"ce": ce_key, "pe": pe_key}
+        except:
+            pass
+
+    # Fetch deltas from Greeks API for all strikes
+    strike_deltas = {}  # {strike: {ce_delta, pe_delta}}
+
+    for strike, keys in instrument_map.items():
+        greeks = get_option_greeks(token, keys["ce"], keys["pe"])
+        if greeks:
+            strike_deltas[strike] = greeks
+
+    # Find strikes with delta closest to 0.32
     for strike in ce_oi_map.keys():
-        if strike < atm_strike:  # CE side
-            if method == 1:
-                delta = calculate_delta_method1(chain_data, spot, strike, T, "CE")
-                if delta is None:
-                    # Fallback to method 2 with adaptive IV
-                    sigma = 0.20  # NIFTY typical
-                    delta = calculate_delta_method2(spot, strike, T, r, sigma, "CE")
-            elif method == 2:
-                sigma = 0.20  # NIFTY typical, will be adjusted per index if needed
-                delta = calculate_delta_method2(spot, strike, T, r, sigma, "CE")
-            else:  # method 3
-                delta = calculate_delta_method3(chain_data, spot, strike, T, r, atm_strike, "CE")
-
-            delta = abs(delta) if delta else 0
+        if strike < atm_strike and strike in strike_deltas:  # CE side (below ATM)
+            delta = abs(strike_deltas[strike].get("ce_delta", 0))
             delta_diff = abs(delta - target_delta)
             if delta_diff < min_delta_diff_ce:
                 min_delta_diff_ce = delta_diff
                 max_gamma_ce = strike
+                print(f"  CE: Strike {strike} -> delta={delta:.4f} (diff={delta_diff:.4f})")
 
     for strike in pe_oi_map.keys():
-        if strike > atm_strike:  # PE side
-            if method == 1:
-                delta = calculate_delta_method1(chain_data, spot, strike, T, "PE")
-                if delta is None:
-                    sigma = 0.20
-                    delta = calculate_delta_method2(spot, strike, T, r, sigma, "PE")
-            elif method == 2:
-                sigma = 0.20
-                delta = calculate_delta_method2(spot, strike, T, r, sigma, "PE")
-            else:  # method 3
-                delta = calculate_delta_method3(chain_data, spot, strike, T, r, atm_strike, "PE")
-
-            delta = abs(delta) if delta else 0
+        if strike > atm_strike and strike in strike_deltas:  # PE side (above ATM)
+            delta = abs(strike_deltas[strike].get("pe_delta", 0))
             delta_diff = abs(delta - target_delta)
             if delta_diff < min_delta_diff_pe:
                 min_delta_diff_pe = delta_diff
                 max_gamma_pe = strike
+                print(f"  PE: Strike {strike} -> delta={delta:.4f} (diff={delta_diff:.4f})")
 
     # Build rows for ATM ±6
     rows = []
@@ -393,14 +364,16 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
     ce_total = sum(oi for oi, _ in ce_oi_map.values()) if ce_oi_map else 0
     pe_total = sum(oi for oi, _ in pe_oi_map.values()) if pe_oi_map else 0
 
+    print(f"\n✅ Max gamma strikes identified:")
+    print(f"  CE: Strike {max_gamma_ce} (Cg)" if max_gamma_ce else "  CE: None found")
+    print(f"  PE: Strike {max_gamma_pe} (Pg)" if max_gamma_pe else "  PE: None found")
+
     return {
         "atm": atm_strike,
         "rows": rows,
         "spot": spot,
         "ce_total": ce_total,
         "pe_total": pe_total,
-        "method": method,
-        "dte": dte,
     }
 
 # ─────────────────────────────────────────────
@@ -472,22 +445,8 @@ def main():
             st.rerun()
 
         st.divider()
-
-        st.markdown("### 📈 Delta Calculation Method")
-        delta_method = st.radio(
-            "Choose method:",
-            [1, 2, 3],
-            captions=[
-                "API-based (if available)",
-                "Black-Scholes (sigma=20%)",
-                "IV from ATM straddle ⭐ Recommended"
-            ],
-            index=2,  # Default to Method 3
-            label_visibility="collapsed"
-        )
-        st.caption(f"Using method {delta_method}")
-
-        st.divider()
+        st.markdown("**Using Upstox Option Greeks API**")
+        st.caption("✅ Real delta values from API")
         show_debug = st.checkbox("🔍 Show Debug Logs")
 
     # Initialize expiry storage
@@ -593,8 +552,8 @@ def main():
             print(f"✅ Spot price: {spot}")
 
             # Extract PCR data
-            print(f"\n🔄 Calling extract_pcr_data with {len(data)} items, expiry={new_selected}, method={delta_method}")
-            pcr_info = extract_pcr_data(data, config["gap"], spot, new_selected, delta_method)
+            print(f"\n🔄 Calling extract_pcr_data with {len(data)} items, expiry={new_selected}")
+            pcr_info = extract_pcr_data(data, config["gap"], spot, new_selected, access_token)
 
             if not pcr_info:
                 print(f"❌ extract_pcr_data returned None")
@@ -608,13 +567,11 @@ def main():
             print(f"   Rows: {len(pcr_info['rows'])}")
 
             # Display metrics
-            col_metric1, col_metric2, col_metric3 = st.columns(3)
+            col_metric1, col_metric2 = st.columns(2)
             with col_metric1:
                 st.metric("Spot Price", f"₹{pcr_info['spot']:,.2f}")
             with col_metric2:
                 st.metric("ATM Strike", f"{pcr_info['atm']:,.0f}")
-            with col_metric3:
-                st.metric("Method", f"#{pcr_info['method']}")
 
             # Display table with ATM and PCR highlighting
             df = pd.DataFrame(pcr_info["rows"])
