@@ -1,6 +1,6 @@
 """
 PCR Analysis Tool - Nifty & Bank Nifty
-Following the working app pattern from opt_analysis
+Proper data extraction following working app pattern
 """
 
 import streamlit as st
@@ -58,7 +58,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# HELPERS (Following working app pattern)
+# HELPERS
 # ─────────────────────────────────────────────
 
 def secrets_ok() -> bool:
@@ -119,7 +119,7 @@ def fetch_expiry_dates(token: str, symbol: str) -> tuple:
         return None, str(e)
 
 def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
-    """Fetch FRESH option chain data (NO caching like the working app)"""
+    """Fetch FRESH option chain data"""
     for url in UPSTOX_OC_URLS:
         try:
             r = requests.get(
@@ -142,30 +142,48 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
             pass
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
-def extract_pcr_data(chain_data: list, symbol: str, gap: int, spot: float) -> dict:
-    """Extract PCR data for ATM ±6 strikes"""
+def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
+    """Extract PCR data for ATM ±6 strikes - PROPER EXTRACTION"""
 
-    # Find nearest ATM strike
+    if not chain_data:
+        return None
+
+    # Find ATM strike
     atm_strike = round(spot / gap) * gap
 
-    # Extract CE and PE OI data
+    # Build strike->OI maps by examining each row
     ce_oi_map = {}
     pe_oi_map = {}
 
     for item in chain_data:
-        opt = item.get("option_data", {})
-        if not opt:
-            continue
+        try:
+            # Different API versions may structure data differently
+            # Try option_data first (v2)
+            opt_data = item.get("option_data")
+            if opt_data:
+                strike = float(opt_data.get("strike_price", 0))
+                oi = int(opt_data.get("open_interest", 0))
+                opt_type = opt_data.get("option_type", "")
 
-        strike = float(opt.get("strike_price", 0))
-        oi = int(opt.get("open_interest", 0))
-        option_type = opt.get("option_type", "")
+                if strike > 0:
+                    if opt_type == "CE":
+                        ce_oi_map[strike] = oi
+                    elif opt_type == "PE":
+                        pe_oi_map[strike] = oi
+            else:
+                # Try flat structure (v3)
+                if "strike_price" in item:
+                    strike = float(item.get("strike_price", 0))
+                    oi = int(item.get("open_interest", 0))
+                    opt_type = item.get("option_type", "")
 
-        if strike > 0:
-            if option_type == "CE":
-                ce_oi_map[strike] = oi
-            elif option_type == "PE":
-                pe_oi_map[strike] = oi
+                    if strike > 0:
+                        if opt_type == "CE":
+                            ce_oi_map[strike] = oi
+                        elif opt_type == "PE":
+                            pe_oi_map[strike] = oi
+        except:
+            pass
 
     # Build rows for ATM ±6
     rows = []
@@ -175,23 +193,21 @@ def extract_pcr_data(chain_data: list, symbol: str, gap: int, spot: float) -> di
         pe_oi = pe_oi_map.get(strike, 0)
 
         # Calculate PCR
-        pcr = pe_oi / ce_oi if ce_oi > 0 else 0
+        pcr = pe_oi / ce_oi if ce_oi > 0 else 0.0
 
         rows.append({
             "Strike": f"₹{strike:,.0f}",
             "CE OI": f"{ce_oi:,}",
             "PE OI": f"{pe_oi:,}",
             "PCR": f"{pcr:.2f}",
-            "_strike_val": strike,
-            "_ce_oi_val": ce_oi,
-            "_pe_oi_val": pe_oi,
-            "_pcr_val": pcr,
         })
 
     return {
         "atm": atm_strike,
         "rows": rows,
         "spot": spot,
+        "ce_total": sum(ce_oi_map.values()),
+        "pe_total": sum(pe_oi_map.values()),
     }
 
 # ─────────────────────────────────────────────
@@ -211,25 +227,13 @@ def main():
     # Check secrets
     if not secrets_ok():
         st.error("⚠️ Upstox credentials not configured")
-        st.info("""
-        **Setup Instructions:**
-        1. Go to developer.upstox.com
-        2. Create API credentials
-        3. Streamlit Cloud → Settings → Secrets → Add:
-        ```
-        [upstox]
-        api_key = "your_key"
-        api_secret = "your_secret"
-        redirect_uri = "https://yourapp.streamlit.app"
-        ```
-        """)
         st.stop()
 
     api_key = st.secrets["upstox"]["api_key"]
     api_secret = st.secrets["upstox"]["api_secret"]
     redirect_uri = st.secrets["upstox"]["redirect_uri"]
 
-    # OAuth (following working app pattern)
+    # OAuth
     qp = st.query_params
     auth_code = qp.get("code")
     if auth_code and "access_token" not in st.session_state:
@@ -275,126 +279,106 @@ def main():
             st.rerun()
 
     # Initialize expiry storage
-    if "instrument_expiries" not in st.session_state:
-        st.session_state.instrument_expiries = {}
+    if "pcr_expiries" not in st.session_state:
+        st.session_state.pcr_expiries = {}
 
     access_token = st.session_state["access_token"]
 
-    # Fetch data for both symbols
-    pcr_data = {}
-
-    for symbol_key in ["NIFTY", "BANKNIFTY"]:
-        config = STRIKE_CONFIG[symbol_key]
-
-        # Fetch expiry dates
-        try:
-            expiry_dates, exp_err = fetch_expiry_dates(access_token, symbol_key)
-
-            if exp_err == "token_expired":
-                del st.session_state["access_token"]
-                st.rerun()
-
-            if not expiry_dates:
-                pcr_data[symbol_key] = None
-                continue
-
-        except:
-            pcr_data[symbol_key] = None
-            continue
-
-        # Get or set default expiry
-        if symbol_key not in st.session_state.instrument_expiries:
-            st.session_state.instrument_expiries[symbol_key] = expiry_dates[0]
-
-        selected = st.session_state.instrument_expiries[symbol_key]
-
-        # Fetch chain
-        data, chain_err, _ = fetch_chain(access_token, symbol_key, selected)
-
-        if chain_err == "token_expired":
-            del st.session_state["access_token"]
-            st.rerun()
-
-        if chain_err or not data:
-            pcr_data[symbol_key] = None
-            continue
-
-        # Extract spot price
-        spot = None
-        for row in data:
-            sp = row.get("underlying_spot_price")
-            if sp:
-                spot = float(sp)
-                break
-
-        if not spot or spot <= 0:
-            pcr_data[symbol_key] = None
-            continue
-
-        # Extract PCR data
-        try:
-            pcr_info = extract_pcr_data(data, symbol_key, config["gap"], spot)
-            pcr_data[symbol_key] = (pcr_info, selected)
-        except Exception as e:
-            st.error(f"Error processing {symbol_key}: {e}")
-            pcr_data[symbol_key] = None
-
-    # Display tables
+    # Display PCR Tables
     st.subheader("📊 PCR Tables - ATM ±6 Strikes")
 
     col1, col2 = st.columns(2)
 
-    # NIFTY Table
-    with col1:
-        st.markdown("### NIFTY 50")
-        if "NIFTY" in st.session_state.instrument_expiries:
-            selected_nifty = st.selectbox(
-                "Expiry",
-                options=[],  # Will be populated
-                key="nifty_exp"
-            )
+    for col_idx, symbol_key in enumerate(["NIFTY", "BANKNIFTY"]):
+        with col1 if col_idx == 0 else col2:
+            st.markdown(f"### {STRIKE_CONFIG[symbol_key]['name']}")
 
-        if pcr_data["NIFTY"]:
-            pcr_info, expiry = pcr_data["NIFTY"]
+            config = STRIKE_CONFIG[symbol_key]
 
-            st.metric("Spot Price", f"₹{pcr_info['spot']:,.2f}")
-            st.metric("ATM Strike", f"₹{pcr_info['atm']:,.0f}")
+            # Fetch expiry dates
+            try:
+                expiry_dates, exp_err = fetch_expiry_dates(access_token, symbol_key)
 
-            # Remove helper columns for display
-            display_rows = [
-                {k: v for k, v in row.items() if not k.startswith("_")}
-                for row in pcr_info["rows"]
-            ]
-            df = pd.DataFrame(display_rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.warning("No data available")
+                if exp_err == "token_expired":
+                    del st.session_state["access_token"]
+                    st.rerun()
 
-    # BANKNIFTY Table
-    with col2:
-        st.markdown("### BANKNIFTY")
-        if "BANKNIFTY" in st.session_state.instrument_expiries:
-            selected_bnifty = st.selectbox(
-                "Expiry",
-                options=[],  # Will be populated
-                key="bnifty_exp"
-            )
+                if not expiry_dates:
+                    st.error("No expiry dates available")
+                    continue
 
-        if pcr_data["BANKNIFTY"]:
-            pcr_info, expiry = pcr_data["BANKNIFTY"]
+                # Get or set default expiry
+                if symbol_key not in st.session_state.pcr_expiries:
+                    st.session_state.pcr_expiries[symbol_key] = expiry_dates[0]
 
-            st.metric("Spot Price", f"₹{pcr_info['spot']:,.2f}")
-            st.metric("ATM Strike", f"₹{pcr_info['atm']:,.0f}")
+                selected = st.session_state.pcr_expiries[symbol_key]
 
-            # Remove helper columns for display
-            display_rows = [
-                {k: v for k, v in row.items() if not k.startswith("_")}
-                for row in pcr_info["rows"]
-            ]
-            df = pd.DataFrame(display_rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.warning("No data available")
+                # Show expiry selector
+                new_selected = st.selectbox(
+                    "Select Expiry",
+                    options=expiry_dates,
+                    index=expiry_dates.index(selected) if selected in expiry_dates else 0,
+                    key=f"pcr_exp_{symbol_key}",
+                    label_visibility="collapsed"
+                )
+                st.session_state.pcr_expiries[symbol_key] = new_selected
+
+            except Exception as e:
+                st.error(f"Error fetching expiry: {e}")
+                continue
+
+            # Fetch chain
+            try:
+                data, chain_err, _ = fetch_chain(access_token, symbol_key, new_selected)
+
+                if chain_err == "token_expired":
+                    del st.session_state["access_token"]
+                    st.rerun()
+
+                if chain_err or not data:
+                    st.error(f"Failed to fetch chain: {chain_err}")
+                    continue
+
+                # Extract spot price
+                spot = None
+                for row in data:
+                    sp = row.get("underlying_spot_price")
+                    if sp:
+                        spot = float(sp)
+                        break
+
+                if not spot or spot <= 0:
+                    st.error("Invalid spot price")
+                    continue
+
+                # Extract PCR data
+                pcr_info = extract_pcr_data(data, config["gap"], spot)
+
+                if not pcr_info:
+                    st.error("Failed to extract data")
+                    continue
+
+                # Display metrics
+                col_metric1, col_metric2 = st.columns(2)
+                with col_metric1:
+                    st.metric("Spot Price", f"₹{pcr_info['spot']:,.2f}")
+                with col_metric2:
+                    st.metric("ATM Strike", f"₹{pcr_info['atm']:,.0f}")
+
+                # Display table
+                df = pd.DataFrame(pcr_info["rows"])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+                # Show summary
+                with st.expander("📊 Summary"):
+                    st.write(f"Total CE OI: {pcr_info['ce_total']:,}")
+                    st.write(f"Total PE OI: {pcr_info['pe_total']:,}")
+                    overall_pcr = pcr_info['pe_total'] / pcr_info['ce_total'] if pcr_info['ce_total'] > 0 else 0
+                    st.write(f"Overall PCR: {overall_pcr:.2f}")
+
+            except Exception as e:
+                st.error(f"Error: {e}")
+                continue
 
     # Auto-refresh
     time.sleep(60)
