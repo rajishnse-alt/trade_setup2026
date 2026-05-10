@@ -154,46 +154,60 @@ def fetch_chain(token: str, symbol: str, expiry_date: str) -> tuple:
     return None, "Failed to fetch chain", UPSTOX_OC_URLS[-1]
 
 def extract_strike_data(chain_data: list, option_type: str) -> dict:
-    """Extract strike -> OI mapping from chain data"""
+    """Extract strike -> OI mapping from chain data
+
+    Upstox API v3 structure:
+    {
+        "strike_price": 50000,
+        "call_options": {"market_data": {"oi": 5000000, ...}},
+        "put_options": {"market_data": {"oi": 4500000, ...}}
+    }
+    """
     strike_data = {}
-    print(f"\n🔍 [extract_strike_data] Processing {option_type}")
-    print(f"📊 Total items in chain_data: {len(chain_data)}")
+    print(f"\n🔍 Extracting {option_type} data")
+    print(f"📊 Total items in chain: {len(chain_data)}")
 
     if chain_data:
         print(f"📋 First item keys: {list(chain_data[0].keys())}")
-        print(f"📄 First item: {str(chain_data[0])[:300]}...")
+        if "call_options" in chain_data[0]:
+            print(f"✅ Found call_options structure!")
+        if "put_options" in chain_data[0]:
+            print(f"✅ Found put_options structure!")
 
-    for idx, item in enumerate(chain_data):
+    extracted = 0
+    for idx, row in enumerate(chain_data):
         try:
-            opt = item.get("option_data", {})
-            if not opt:
-                if idx < 2:
-                    print(f"⚠️ Item {idx}: No option_data found. Item keys: {list(item.keys())}")
+            # Get strike at root level
+            strike = int(float(row.get("strike_price", 0)))
+            if strike <= 0:
                 continue
 
-            item_type = opt.get("option_type", "")
-            if item_type != option_type:
-                if idx < 2:
-                    print(f"✓ Item {idx}: Type={item_type} (skipping, looking for {option_type})")
-                continue
+            # Get OI from call_options or put_options
+            if option_type == "CE":
+                call_md = (row.get("call_options") or {}).get("market_data") or {}
+                oi = float(call_md.get("oi") or 0)
+                ltp = float(call_md.get("ltp") or 0)
+            else:  # PE
+                put_md = (row.get("put_options") or {}).get("market_data") or {}
+                oi = float(put_md.get("oi") or 0)
+                ltp = float(put_md.get("ltp") or 0)
 
-            strike = float(opt.get("strike_price", 0))
-            oi = int(opt.get("open_interest", 0))
+            if idx < 5:
+                print(f"✓ Item {idx}: Strike={strike}, {option_type}_OI={oi}, LTP={ltp}")
 
-            if idx < 3:
-                print(f"✓ Item {idx}: Strike={strike}, OI={oi}, Type={item_type}")
+            if oi > 0:
+                strike_data[int(strike)] = int(oi)
+                extracted += 1
 
-            if strike > 0:
-                strike_data[strike] = oi
         except Exception as e:
             if idx < 3:
-                print(f"❌ Error processing item {idx}: {e}")
+                print(f"❌ Error item {idx}: {type(e).__name__}: {e}")
             continue
 
-    print(f"✅ Extracted {len(strike_data)} {option_type} strikes")
+    print(f"✅ Extracted {extracted} {option_type} strikes with OI > 0")
     if strike_data:
         sample = list(strike_data.items())[:3]
-        print(f"📈 Sample {option_type} data: {sample}")
+        print(f"📈 Sample: {sample}")
 
     return strike_data
 
