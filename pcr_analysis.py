@@ -341,34 +341,28 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float, expiry_date: str, 
 
     # Build correct instrument keys using FULL format from chain data
     # Format: NSE_FO:BANKNIFTY26MAY54700CE (as returned by API)
+    # ALWAYS build in full format, even if partial data extracted
+
+    # Calculate expiry format: 26MAY from 2026-05-26
+    expiry_fmt = None
+    try:
+        exp_date = datetime.strptime(expiry_date, "%Y-%m-%d")
+        expiry_fmt = exp_date.strftime("%d%b").upper()  # 26MAY
+    except:
+        pass
+
     for row in chain_data:
         try:
             strike = int(float(row.get("strike_price", 0)))
-            if strike in atm_strikes_to_fetch:
-                # Try to extract full instrument key from call_options/put_options
-                ce_key = row.get("call_options", {}).get("instrument_key")
-                pe_key = row.get("put_options", {}).get("instrument_key")
+            if strike in atm_strikes_to_fetch and underlying_symbol and expiry_fmt:
+                # ALWAYS build full format for consistency with API response
+                ce_key = f"NSE_FO:{underlying_symbol}{expiry_fmt}{strike}CE"
+                pe_key = f"NSE_FO:{underlying_symbol}{expiry_fmt}{strike}PE"
 
-                # Fallback: build from components if not in response
-                if not ce_key or not pe_key:
-                    # Format: NSE_FO:BANKNIFTY26MAY54700CE
-                    # 26MAY format from 2026-05-26 expiry
-                    try:
-                        exp_date = datetime.strptime(expiry_date, "%Y-%m-%d")
-                        expiry_fmt = exp_date.strftime("%d%b").upper()  # 26MAY
-                    except:
-                        expiry_fmt = expiry_formatted  # fallback to YYMMDD
-
-                    if not ce_key:
-                        ce_key = f"NSE_FO:{underlying_symbol}{expiry_fmt}{strike}CE"
-                    if not pe_key:
-                        pe_key = f"NSE_FO:{underlying_symbol}{expiry_fmt}{strike}PE"
-
-                if ce_key and pe_key:
-                    instrument_keys_to_fetch.extend([ce_key, pe_key])
-                    strike_to_keys[strike] = {"ce": ce_key, "pe": pe_key}
-                    if len(strike_to_keys) <= 3:
-                        print(f"  Strike {strike}: CE={ce_key}, PE={pe_key}")
+                instrument_keys_to_fetch.extend([ce_key, pe_key])
+                strike_to_keys[strike] = {"ce": ce_key, "pe": pe_key}
+                if len(strike_to_keys) <= 3:
+                    print(f"  Strike {strike}: CE={ce_key}, PE={pe_key}")
         except Exception as e:
             print(f"  ⚠️ Error processing strike: {e}")
 
