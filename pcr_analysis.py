@@ -241,10 +241,10 @@ def extract_pcr_data(chain_data: list, gap: int, spot: float) -> dict:
         pcr = pe_oi / ce_oi if ce_oi > 0 else 0.0
 
         rows.append({
-            "Strike": f"₹{strike:,.0f}",
             "CE OI": f"{ce_oi:,}",
-            "PE OI": f"{pe_oi:,}",
+            "Strike": f"₹{strike:,.0f}",
             "PCR": f"{pcr:.2f}",
+            "PE OI": f"{pe_oi:,}",
         })
 
     return {
@@ -455,6 +455,10 @@ def main():
 
                 # Display table with ATM and PCR highlighting
                 df = pd.DataFrame(pcr_info["rows"])
+
+                # Ensure correct column order: CE OI, Strike, PCR, PE OI
+                df = df[['CE OI', 'Strike', 'PCR', 'PE OI']]
+
                 atm_strike_str = f"₹{pcr_info['atm']:,.0f}"
 
                 # Extract PCR values as floats for analysis
